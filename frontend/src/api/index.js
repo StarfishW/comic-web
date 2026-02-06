@@ -40,8 +40,8 @@ export const getChapterImageUrl = (photoId, index) =>
   `/api/chapters/${photoId}/images/${index}`
 
 // ---- Auth ----
-export const login = (username, password) =>
-  http.post('/auth/login', { username, password })
+export const login = (password) =>
+  http.post('/auth/login', { password })
 
 // ---- Favorites ----
 export const getFavorites = (params = {}) =>

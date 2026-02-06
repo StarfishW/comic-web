@@ -4,23 +4,25 @@ import { useRouter } from 'vue-router'
 import { login } from '../api'
 
 const router = useRouter()
-const username = ref('')
 const password = ref('')
 const loading = ref(false)
 const error = ref(null)
 
 async function handleLogin() {
-  if (!username.value || !password.value) {
-    error.value = '请输入用户名和密码'
+  if (!password.value) {
+    error.value = '请输入密码'
     return
   }
   try {
     loading.value = true
     error.value = null
-    await login(username.value, password.value)
+    const result = await login(password.value)
+    // Store auth token
+    localStorage.setItem('auth_token', result.token || 'authenticated')
+    localStorage.setItem('is_authenticated', 'true')
     router.push('/')
   } catch (e) {
-    error.value = '登录失败: ' + (e.response?.data?.detail || e.message)
+    error.value = e.response?.data?.detail || '密码错误'
   } finally {
     loading.value = false
   }
@@ -30,24 +32,12 @@ async function handleLogin() {
 <template>
   <div class="login-view">
     <div class="login-card">
-      <h1 class="login-title">登录</h1>
-      <p class="login-desc">登录后可使用收藏、评论等功能</p>
+      <h1 class="login-title">网站访问验证</h1>
+      <p class="login-desc">请输入访问密码</p>
 
       <form @submit.prevent="handleLogin" class="login-form">
         <div class="field">
-          <label for="username" class="label">用户名</label>
-          <input
-            id="username"
-            v-model="username"
-            type="text"
-            autocomplete="username"
-            placeholder="输入用户名"
-            class="input"
-          />
-        </div>
-
-        <div class="field">
-          <label for="password" class="label">密码</label>
+          <label for="password" class="label">访问密码</label>
           <input
             id="password"
             v-model="password"
@@ -55,13 +45,14 @@ async function handleLogin() {
             autocomplete="current-password"
             placeholder="输入密码"
             class="input"
+            autofocus
           />
         </div>
 
         <div v-if="error" class="error-msg">{{ error }}</div>
 
         <button type="submit" class="submit-btn" :disabled="loading">
-          {{ loading ? '登录中...' : '登录' }}
+          {{ loading ? '验证中...' : '进入' }}
         </button>
       </form>
     </div>

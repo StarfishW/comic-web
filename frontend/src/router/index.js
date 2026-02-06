@@ -53,4 +53,19 @@ const router = createRouter({
   },
 })
 
+// Navigation guard - require authentication for all routes except login
+router.beforeEach((to, from, next) => {
+  const isAuthenticated = localStorage.getItem('is_authenticated') === 'true'
+
+  if (to.name !== 'Login' && !isAuthenticated) {
+    // Redirect to login if not authenticated
+    next({ name: 'Login' })
+  } else if (to.name === 'Login' && isAuthenticated) {
+    // Redirect to home if already authenticated
+    next({ name: 'Home' })
+  } else {
+    next()
+  }
+})
+
 export default router

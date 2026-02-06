@@ -1,7 +1,9 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { pingDomains, switchDomain } from '../api'
 
+const router = useRouter()
 const loading = ref(false)
 const switching = ref('')
 const results = ref([])
@@ -35,6 +37,12 @@ async function handleSwitch(domain) {
   } finally {
     switching.value = ''
   }
+}
+
+function handleLogout() {
+  localStorage.removeItem('auth_token')
+  localStorage.removeItem('is_authenticated')
+  router.push('/login')
 }
 
 function latencyColor(latency) {
@@ -119,6 +127,20 @@ onMounted(fetchPing)
           <p>暂无域名数据，点击刷新延迟进行检测</p>
         </div>
       </div>
+
+      <!-- Logout Section -->
+      <div class="section logout-section">
+        <h2 class="section-title">账户</h2>
+        <p class="section-desc">退出登录后需要重新输入密码才能访问网站。</p>
+        <button class="logout-btn" @click="handleLogout">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+          退出登录
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -139,6 +161,17 @@ onMounted(fetchPing)
   border-radius: var(--radius-md);
   padding: 24px;
   box-shadow: var(--shadow-sm);
+  margin-bottom: 20px;
+}
+
+.logout-section {
+  margin-top: 20px;
+}
+
+.section-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 8px;
 }
 
 .section-header {
@@ -364,6 +397,29 @@ onMounted(fetchPing)
   padding: 40px 20px;
   color: var(--color-text-muted);
   font-size: 14px;
+}
+
+.logout-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border: 1px solid #dc2626;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 500;
+  color: #dc2626;
+  background: transparent;
+  transition: all 0.2s;
+}
+
+.logout-btn:hover {
+  background: #dc2626;
+  color: #fff;
+}
+
+.logout-btn svg {
+  flex-shrink: 0;
 }
 
 @media (max-width: 640px) {

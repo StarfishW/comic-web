@@ -334,21 +334,20 @@ def chapter_image(photo_id: str, index: int):
 
 # ---- User / Auth ----
 
+# Simple password protection - you can change this
+SITE_PASSWORD = "wyq678"
+
 class LoginRequest(BaseModel):
-    username: str
     password: str
 
 
 @app.post("/api/auth/login")
 def login(body: LoginRequest):
-    """Login and store session."""
-    try:
-        cl = get_client()
-        cl.login(body.username, body.password)
-        return {"ok": True, "message": "Login successful"}
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(401, str(e))
+    """Simple password verification for site access."""
+    if body.password == SITE_PASSWORD:
+        return {"ok": True, "message": "Login successful", "token": "authenticated"}
+    else:
+        raise HTTPException(401, "密码错误")
 
 
 # ---- Favorites ----
