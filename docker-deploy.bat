@@ -60,7 +60,7 @@ echo 部署完成！
 echo ========================================
 echo.
 echo 服务访问地址:
-echo   前端页面: http://localhost
+echo   前端页面: http://localhost:90
 echo   后端 API: http://localhost:8000
 echo   API 文档: http://localhost:8000/docs
 echo.

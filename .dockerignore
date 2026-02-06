@@ -36,6 +36,7 @@ Thumbs.db
 
 # Documentation
 *.md
+!jmcomic/README.md
 docs/
 
 # Test files

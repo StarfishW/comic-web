@@ -23,7 +23,7 @@ services:
       dockerfile: Dockerfile
     container_name: comic-frontend
     ports:
-      - "80:80"
+      - "90:80"
     depends_on:
       - backend
     restart: unless-stopped
