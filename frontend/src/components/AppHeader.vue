@@ -37,6 +37,7 @@ function toggleMenu() {
         <router-link to="/" class="nav-link">首页</router-link>
         <router-link to="/ranking" class="nav-link">排行榜</router-link>
         <router-link to="/favorites" class="nav-link">收藏</router-link>
+        <router-link to="/settings" class="nav-link">设置</router-link>
       </nav>
 
       <form class="search-bar" @submit.prevent="handleSearch" role="search">
@@ -68,6 +69,7 @@ function toggleMenu() {
           <router-link to="/" class="mobile-link" @click="mobileMenuOpen = false">首页</router-link>
           <router-link to="/ranking" class="mobile-link" @click="mobileMenuOpen = false">排行榜</router-link>
           <router-link to="/favorites" class="mobile-link" @click="mobileMenuOpen = false">收藏</router-link>
+          <router-link to="/settings" class="mobile-link" @click="mobileMenuOpen = false">设置</router-link>
           <router-link to="/login" class="mobile-link" @click="mobileMenuOpen = false">登录</router-link>
         </nav>
         <form class="mobile-search" @submit.prevent="handleSearch" role="search">

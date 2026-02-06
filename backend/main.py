@@ -5,9 +5,11 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'jmcomic', 'src'))
 
 import io
+import time
 import traceback
-from typing import Optional
+from typing import Optional, List
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -164,10 +166,12 @@ def ranking(
     page: int = Query(1, ge=1),
     category: str = Query("0"),
 ):
-    """Get ranking: day / week / month."""
+    """Get ranking: all / day / week / month."""
     try:
         cl = get_client()
-        if ranking_type == "day":
+        if ranking_type == "all":
+            result = cl.categories_filter(page, 'a', category, 'mv')
+        elif ranking_type == "day":
             result = cl.day_ranking(page, category)
         elif ranking_type == "week":
             result = cl.week_ranking(page, category)
@@ -407,6 +411,118 @@ def post_comment(body: CommentRequest):
             comment_id=body.comment_id,
         )
         return {"ok": True}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+
+# ---- Domain Management ----
+
+@app.get("/api/domains")
+def get_domains():
+    """Get current domain list."""
+    try:
+        cl = get_client()
+        return {"domains": cl.get_domain_list()}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+
+class DomainRequest(BaseModel):
+    domains: list
+
+
+@app.put("/api/domains")
+def set_domains(body: DomainRequest):
+    """Set domain list."""
+    try:
+        cl = get_client()
+        cl.set_domain_list(body.domains)
+        return {"ok": True, "domains": cl.get_domain_list()}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/domains/discover")
+def discover_domains():
+    """Discover all available domains."""
+    try:
+        cl = get_client()
+        html_domain = cl.get_html_domain()
+        all_domains = cl.get_html_domain_all()
+        return {
+            "current": html_domain,
+            "available": all_domains,
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+
+def _ping_domain(domain: str, timeout: float = 8.0) -> dict:
+    """Ping a single domain and return latency info."""
+    from curl_cffi import requests as curl_requests
+    url = f"https://{domain}"
+    try:
+        start = time.time()
+        resp = curl_requests.get(
+            url,
+            timeout=timeout,
+            impersonate="chrome",
+            allow_redirects=False,
+        )
+        latency = round((time.time() - start) * 1000)
+        return {"domain": domain, "latency": latency, "status": "ok"}
+    except Exception as e:
+        return {"domain": domain, "latency": -1, "status": "error", "error": str(e)}
+
+
+@app.get("/api/domains/ping")
+def ping_domains():
+    """Test latency for all known domains."""
+    try:
+        cl = get_client()
+        current_domains = cl.get_domain_list()
+        # Also try to discover more domains
+        all_domains = set(current_domains)
+        try:
+            discovered = cl.get_html_domain_all()
+            if discovered:
+                all_domains.update(discovered)
+        except Exception:
+            pass
+
+        results = []
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(_ping_domain, d): d for d in all_domains}
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        results.sort(key=lambda x: (x["latency"] < 0, x["latency"]))
+        return {
+            "current": current_domains,
+            "results": results,
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+
+class SwitchDomainRequest(BaseModel):
+    domain: str
+
+
+@app.post("/api/domains/switch")
+def switch_domain(body: SwitchDomainRequest):
+    """Switch to a specific domain by putting it first in the list."""
+    try:
+        cl = get_client()
+        current = cl.get_domain_list()
+        new_list = [body.domain] + [d for d in current if d != body.domain]
+        cl.set_domain_list(new_list)
+        return {"ok": True, "domains": cl.get_domain_list()}
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(500, str(e))

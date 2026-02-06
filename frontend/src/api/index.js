@@ -54,4 +54,14 @@ export const addFavorite = (albumId, folderId = '0') =>
 export const postComment = (videoId, comment, commentId = null) =>
   http.post('/comments', { video_id: videoId, comment, comment_id: commentId })
 
+// ---- Domain Management ----
+export const getDomains = () =>
+  http.get('/domains')
+
+export const pingDomains = () =>
+  http.get('/domains/ping', { timeout: 60000 })
+
+export const switchDomain = (domain) =>
+  http.post('/domains/switch', { domain })
+
 export default http
