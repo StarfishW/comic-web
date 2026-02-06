@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.env
+__pycache__/
+*.pyc
+*.pyo
+.vscode/
+.idea/
+frontend/node_modules/
+frontend/dist/
+.claude/
