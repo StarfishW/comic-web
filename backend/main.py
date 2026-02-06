@@ -278,11 +278,37 @@ def chapter_image(photo_id: str, index: int):
 
         # Decode if needed
         if scramble_id and not cl.img_is_not_need_to_decode(img_url, resp):
+            import tempfile, os, math
+            from PIL import Image
+
             num = JmImageTool.get_num_by_url(scramble_id, img_url)
-            img = JmImageTool.open_image(resp.content)
-            img = JmImageTool.decode_image(num, img)
+            img_src = JmImageTool.open_image(resp.content)
+
+            if num == 0:
+                # No decoding needed
+                buf = io.BytesIO()
+                img_src.save(buf, format="JPEG", quality=92)
+                return Response(content=buf.getvalue(), media_type="image/jpeg")
+
+            # In-memory decode (replicate decode_and_save logic)
+            w, h = img_src.size
+            img_decode = Image.new("RGB", (w, h))
+            over = h % num
+            for i in range(num):
+                move = math.floor(h / num)
+                y_src = h - (move * (i + 1)) - over
+                y_dst = move * i
+                if i == 0:
+                    move += over
+                else:
+                    y_dst += over
+                img_decode.paste(
+                    img_src.crop((0, y_src, w, y_src + move)),
+                    (0, y_dst, w, y_dst + move),
+                )
+
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=92)
+            img_decode.save(buf, format="JPEG", quality=92)
             return Response(content=buf.getvalue(), media_type="image/jpeg")
         else:
             # GIF or no-decode needed
