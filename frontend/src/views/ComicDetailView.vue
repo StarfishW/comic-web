@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue'
 import { getCoverUrl, getComicDetail, addFavorite } from '../api'
+import LazyImage from '../components/LazyImage.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 
@@ -61,7 +62,7 @@ onMounted(fetchComic)
       <template v-else-if="comic">
         <div class="detail-header">
           <div class="cover-box">
-            <img :src="getCoverUrl(comic.id)" :alt="comic.title" class="cover-img" />
+            <LazyImage :src="getCoverUrl(comic.id)" :alt="comic.title" class="cover-img" />
           </div>
           <div class="meta-box">
             <h1 class="comic-title">{{ comic.title }}</h1>
@@ -149,9 +150,14 @@ onMounted(fetchComic)
   box-shadow: var(--shadow-md);
 }
 
-.cover-img {
+.cover-img :deep(.lazy-image-wrapper) {
   width: 100%;
   aspect-ratio: 3 / 4;
+}
+
+.cover-img :deep(.lazy-image) {
+  width: 100%;
+  height: 100%;
   object-fit: cover;
 }
 

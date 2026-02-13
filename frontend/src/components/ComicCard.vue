@@ -1,5 +1,6 @@
 <script setup>
 import { getCoverUrl } from '../api'
+import LazyImage from './LazyImage.vue'
 
 const props = defineProps({
   comic: { type: Object, required: true },
@@ -9,11 +10,10 @@ const props = defineProps({
 <template>
   <router-link :to="`/comic/${comic.id}`" class="comic-card" :aria-label="comic.title">
     <div class="cover-wrap">
-      <img
+      <LazyImage
         :src="getCoverUrl(comic.id)"
         :alt="comic.title"
         class="cover"
-        loading="lazy"
       />
     </div>
     <div class="info">
@@ -49,14 +49,19 @@ const props = defineProps({
   background: var(--color-border);
 }
 
-.cover {
+.cover :deep(.lazy-image-wrapper) {
+  width: 100%;
+  height: 100%;
+}
+
+.cover :deep(.lazy-image) {
   width: 100%;
   height: 100%;
   object-fit: cover;
   transition: transform 0.3s;
 }
 
-.comic-card:hover .cover {
+.comic-card:hover .cover :deep(.lazy-image) {
   transform: scale(1.03);
 }
 

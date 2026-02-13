@@ -1,72 +1,258 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { getChapterDetail, getChapterImageUrl } from '../api'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
+import { useRouter } from "vue-router";
+import { getChapterDetail, getChapterImageUrl } from "../api";
+import LazyImage from "../components/LazyImage.vue";
+import ImageLoader from "../utils/imageLoader";
 
-const props = defineProps({ photoId: { type: String, required: true } })
-const router = useRouter()
+// 图片加载配置
+const LOADING_CONFIG = {
+  priorityPages: 10, // 优先加载的页数
+  priorityDelay: 50, // 优先页面加载间隔（毫秒）
+  normalDelay: 500, // 普通页面加载间隔（毫秒）
+  maxConcurrent: 5, // 最大并发数
+};
 
-const chapter = ref(null)
-const loading = ref(true)
-const error = ref(null)
-const mode = ref('scroll') // 'scroll' | 'page'
-const currentPage = ref(0)
-const showToolbar = ref(true)
-let hideTimer = null
+const props = defineProps({ photoId: { type: String, required: true } });
+const router = useRouter();
 
-const totalPages = computed(() => chapter.value?.images?.length || 0)
+const chapter = ref(null);
+const loading = ref(true);
+const error = ref(null);
+const mode = ref("scroll"); // 'scroll' | 'page'
+const currentPage = ref(0);
+const showToolbar = ref(true);
+const loadingProgress = ref(0);
+const imageLoader = new ImageLoader({
+  maxConcurrent: LOADING_CONFIG.maxConcurrent,
+  sequential: true,
+});
+const lazyImageRefs = ref([]);
+let loadingCancelled = false; // 用于取消加载
+
+let hideTimer = null;
+
+const totalPages = computed(() => chapter.value?.images?.length || 0);
 
 function getImageSrc(index) {
-  return getChapterImageUrl(props.photoId, index)
+  return getChapterImageUrl(props.photoId, index);
 }
 
 async function fetchChapter() {
   try {
-    loading.value = true
-    error.value = null
-    chapter.value = await getChapterDetail(props.photoId)
-    currentPage.value = 0
+    loading.value = true;
+    error.value = null;
+    loadingProgress.value = 0;
+    loadingCancelled = false;
+    imageLoader.clear();
+    lazyImageRefs.value = []; // 清空旧的 refs
+
+    chapter.value = await getChapterDetail(props.photoId);
+    currentPage.value = 0;
+
+    // 等待 DOM 更新后开始顺序加载
+    await nextTick();
+
+    // 再次等待，确保所有 refs 都已设置
+    await nextTick();
+
+    // 在滚动模式下启动顺序加载
+    if (mode.value === "scroll") {
+      // 添加一个小延迟，确保 refs 完全就绪
+      setTimeout(() => {
+        startSequentialLoading();
+      }, 100);
+    }
   } catch (e) {
-    error.value = '加载失败: ' + (e.response?.data?.detail || e.message)
+    error.value = "加载失败: " + (e.response?.data?.detail || e.message);
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
+// 顺序加载图片 - 优化版：支持并发加载
+function startSequentialLoading() {
+  const images = chapter.value?.images || [];
+  let currentIndex = 0;
+  let loadingCount = 0; // 当前正在加载的数量
+  let completedCount = 0; // 已完成的数量
+  loadingCancelled = false; // 重置取消标志
+
+  console.log('[加载] 开始顺序加载', {
+    totalImages: images.length,
+    refsCount: lazyImageRefs.value.length,
+    maxConcurrent: LOADING_CONFIG.maxConcurrent,
+  });
+
+  // 检查 refs 是否正确设置
+  if (lazyImageRefs.value.length === 0) {
+    console.error('[加载] lazyImageRefs 为空，无法加载图片！');
+    return;
+  }
+
+  function loadNext() {
+    // 检查是否已取消或已完成所有加载
+    if (loadingCancelled || currentIndex >= images.length) return;
+
+    // 控制并发数：确保不超过 maxConcurrent
+    while (
+      loadingCount < LOADING_CONFIG.maxConcurrent &&
+      currentIndex < images.length &&
+      !loadingCancelled
+    ) {
+      const indexToLoad = currentIndex;
+      currentIndex++;
+      loadingCount++;
+
+      const ref = lazyImageRefs.value[indexToLoad];
+      if (ref && !ref.isLoaded) {
+        // 计算延迟：前N页快速，后续慢速
+        const delay =
+          indexToLoad < LOADING_CONFIG.priorityPages
+            ? LOADING_CONFIG.priorityDelay * indexToLoad
+            : LOADING_CONFIG.priorityDelay * LOADING_CONFIG.priorityPages +
+              LOADING_CONFIG.normalDelay *
+                (indexToLoad - LOADING_CONFIG.priorityPages);
+
+        setTimeout(() => {
+          if (loadingCancelled) {
+            loadingCount--;
+            return;
+          }
+
+          console.log(`[加载] 开始加载第 ${indexToLoad + 1} 页`);
+
+          ref
+            .loadImage()
+            .then(() => {
+              if (loadingCancelled) return;
+              completedCount++;
+              loadingCount--;
+              loadingProgress.value = (completedCount / images.length) * 100;
+              console.log(`[加载] 第 ${indexToLoad + 1} 页加载成功，进度: ${loadingProgress.value.toFixed(1)}%`);
+              // 继续加载下一批
+              loadNext();
+            })
+            .catch(() => {
+              if (loadingCancelled) return;
+              completedCount++;
+              loadingCount--;
+              console.error(`[加载] 第 ${indexToLoad + 1} 页加载失败`);
+              // 加载失败也继续
+              loadNext();
+            });
+        }, delay);
+      } else {
+        // 已加载或无效，直接跳过
+        if (!ref) {
+          console.warn(`[加载] 第 ${indexToLoad + 1} 页的 ref 不存在`);
+        }
+        loadingCount--;
+        completedCount++;
+        loadingProgress.value = (completedCount / images.length) * 100;
+      }
+    }
+  }
+
+  // 开始加载
+  loadNext();
+}
+
+// 取消顺序加载
+function cancelSequentialLoading() {
+  loadingCancelled = true;
+}
+
+// 处理图片可见事件（懒加载触发）
+function handleImageVisible(index) {
+  // 当图片进入视口时，从该位置开始顺序加载
+  const ref = lazyImageRefs.value[index];
+  if (ref && !ref.isLoaded && !ref.isLoading) {
+    ref.loadImage();
+  }
+}
+
+// 预加载翻页模式的图片
+function preloadPageImages() {
+  if (mode.value !== "page") return;
+
+  const indexes = [];
+  // 当前页
+  indexes.push(currentPage.value);
+  // 下一页
+  if (currentPage.value < totalPages.value - 1) {
+    indexes.push(currentPage.value + 1);
+  }
+  // 上一页
+  if (currentPage.value > 0) {
+    indexes.push(currentPage.value - 1);
+  }
+
+  indexes.forEach((index, priority) => {
+    const src = getImageSrc(index);
+    imageLoader.add(src, priority);
+  });
+}
+
 function prevPage() {
-  if (currentPage.value > 0) currentPage.value--
+  if (currentPage.value > 0) currentPage.value--;
 }
 
 function nextPage() {
-  if (currentPage.value < totalPages.value - 1) currentPage.value++
+  if (currentPage.value < totalPages.value - 1) currentPage.value++;
 }
 
 function goBack() {
   if (chapter.value?.album_id) {
-    router.push({ name: 'ComicDetail', params: { id: chapter.value.album_id } })
+    router.push({
+      name: "ComicDetail",
+      params: { id: chapter.value.album_id },
+    });
   } else {
-    router.back()
+    router.back();
   }
 }
 
 function toggleToolbar() {
-  showToolbar.value = !showToolbar.value
+  showToolbar.value = !showToolbar.value;
 }
 
 function handleKeydown(e) {
-  if (mode.value !== 'page') return
-  if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') prevPage()
-  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') nextPage()
+  if (mode.value !== "page") return;
+  if (e.key === "ArrowLeft" || e.key === "ArrowUp") prevPage();
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") nextPage();
 }
 
-watch(() => props.photoId, fetchChapter)
+watch(() => props.photoId, fetchChapter);
+
+// 监听模式切换
+watch(mode, (newMode) => {
+  if (newMode === "page") {
+    // 切换到翻页模式，取消顺序加载
+    cancelSequentialLoading();
+    preloadPageImages();
+  } else if (newMode === "scroll") {
+    // 切换到滚动模式，重新启动顺序加载
+    startSequentialLoading();
+  }
+});
+
+// 监听翻页，预加载相邻页面
+watch(currentPage, () => {
+  if (mode.value === "page") {
+    preloadPageImages();
+  }
+});
+
 onMounted(() => {
-  fetchChapter()
-  document.addEventListener('keydown', handleKeydown)
-})
+  fetchChapter();
+  document.addEventListener("keydown", handleKeydown);
+});
 onUnmounted(() => {
-  document.removeEventListener('keydown', handleKeydown)
-})
+  document.removeEventListener("keydown", handleKeydown);
+  cancelSequentialLoading();
+  imageLoader.clear();
+});
 </script>
 
 <template>
@@ -75,13 +261,45 @@ onUnmounted(() => {
     <transition name="slide-down">
       <div v-if="showToolbar" class="toolbar top-bar" @click.stop>
         <button class="tool-btn" @click="goBack" aria-label="返回">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path d="M19 12H5M12 19l-7-7 7-7" />
+          </svg>
         </button>
-        <span class="toolbar-title">{{ chapter?.title || '阅读中...' }}</span>
+        <span class="toolbar-title">{{ chapter?.title || "阅读中..." }}</span>
         <div class="mode-switch">
-          <button :class="['mode-btn', { active: mode === 'scroll' }]" @click="mode = 'scroll'">滚动</button>
-          <button :class="['mode-btn', { active: mode === 'page' }]" @click="mode = 'page'">翻页</button>
+          <button
+            :class="['mode-btn', { active: mode === 'scroll' }]"
+            @click="mode = 'scroll'"
+          >
+            滚动
+          </button>
+          <button
+            :class="['mode-btn', { active: mode === 'page' }]"
+            @click="mode = 'page'"
+          >
+            翻页
+          </button>
         </div>
+      </div>
+    </transition>
+
+    <!-- Loading Progress Bar -->
+    <transition name="fade">
+      <div
+        v-if="mode === 'scroll' && loadingProgress > 0 && loadingProgress < 100"
+        class="progress-bar"
+      >
+        <div
+          class="progress-fill"
+          :style="{ width: loadingProgress + '%' }"
+        ></div>
       </div>
     </transition>
 
@@ -100,7 +318,18 @@ onUnmounted(() => {
     <!-- Scroll Mode -->
     <div v-else-if="mode === 'scroll'" class="scroll-container">
       <div v-for="(img, i) in chapter.images" :key="i" class="scroll-page">
-        <img :src="getImageSrc(i)" :alt="`第${i + 1}页`" loading="lazy" class="page-img" />
+        <LazyImage
+          :ref="
+            (el) => {
+              if (el) lazyImageRefs[i] = el;
+            }
+          "
+          :src="getImageSrc(i)"
+          :alt="`第${i + 1}页`"
+          :sequential="true"
+          class="page-img"
+          @visible="handleImageVisible(i)"
+        />
         <span class="page-num">{{ i + 1 }} / {{ totalPages }}</span>
       </div>
     </div>
@@ -108,22 +337,40 @@ onUnmounted(() => {
     <!-- Page Mode -->
     <div v-else class="page-container" @click.stop>
       <div class="page-viewer">
-        <img
+        <LazyImage
           :src="getImageSrc(currentPage)"
           :alt="`第${currentPage + 1}页`"
+          :sequential="false"
           class="page-img-single"
         />
       </div>
       <div class="page-nav" @click.stop>
-        <button class="page-area left" @click="prevPage" :disabled="currentPage === 0" aria-label="上一页"></button>
-        <button class="page-area right" @click="nextPage" :disabled="currentPage >= totalPages - 1" aria-label="下一页"></button>
+        <button
+          class="page-area left"
+          @click="prevPage"
+          :disabled="currentPage === 0"
+          aria-label="上一页"
+        ></button>
+        <button
+          class="page-area right"
+          @click="nextPage"
+          :disabled="currentPage >= totalPages - 1"
+          aria-label="下一页"
+        ></button>
       </div>
     </div>
 
     <!-- Bottom Toolbar -->
     <transition name="slide-up">
-      <div v-if="showToolbar && !loading && chapter" class="toolbar bottom-bar" @click.stop>
-        <span class="page-info">{{ (mode === 'page' ? currentPage + 1 : '—') }} / {{ totalPages }}</span>
+      <div
+        v-if="showToolbar && !loading && chapter"
+        class="toolbar bottom-bar"
+        @click.stop
+      >
+        <span class="page-info"
+          >{{ mode === "page" ? currentPage + 1 : "—" }} /
+          {{ totalPages }}</span
+        >
         <input
           v-if="mode === 'page'"
           type="range"
@@ -164,6 +411,23 @@ onUnmounted(() => {
 
 .top-bar {
   top: 0;
+}
+
+/* Loading Progress Bar */
+.progress-bar {
+  position: absolute;
+  top: 56px;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  z-index: 10;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 0.3s ease;
 }
 
 .bottom-bar {
@@ -247,6 +511,23 @@ onUnmounted(() => {
   display: block;
 }
 
+.page-img :deep(.lazy-image) {
+  display: block;
+}
+
+.page-img-single :deep(.lazy-image-wrapper) {
+  max-height: calc(100vh - 120px);
+  max-width: 100%;
+  width: auto;
+  height: auto;
+}
+
+.page-img-single :deep(.lazy-image) {
+  max-height: calc(100vh - 120px);
+  max-width: 100%;
+  object-fit: contain;
+}
+
 .page-num {
   position: absolute;
   bottom: 8px;
@@ -276,12 +557,6 @@ onUnmounted(() => {
   justify-content: center;
 }
 
-.page-img-single {
-  max-height: calc(100vh - 120px);
-  max-width: 100%;
-  object-fit: contain;
-}
-
 .page-nav {
   position: absolute;
   inset: 56px 0 50px;
@@ -300,11 +575,11 @@ onUnmounted(() => {
 }
 
 .page-area.left:hover:not(:disabled) {
-  background: linear-gradient(to right, rgba(0,0,0,0.1), transparent);
+  background: linear-gradient(to right, rgba(0, 0, 0, 0.1), transparent);
 }
 
 .page-area.right:hover:not(:disabled) {
-  background: linear-gradient(to left, rgba(0,0,0,0.1), transparent);
+  background: linear-gradient(to left, rgba(0, 0, 0, 0.1), transparent);
 }
 
 /* States */
@@ -328,7 +603,11 @@ onUnmounted(() => {
   animation: spin 0.7s linear infinite;
 }
 
-@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 
 .retry-btn {
   padding: 8px 24px;
@@ -339,9 +618,20 @@ onUnmounted(() => {
 }
 
 /* Transitions */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
 .slide-down-enter-active,
 .slide-down-leave-active {
-  transition: transform 0.25s ease, opacity 0.2s ease;
+  transition:
+    transform 0.25s ease,
+    opacity 0.2s ease;
 }
 .slide-down-enter-from,
 .slide-down-leave-to {
@@ -351,7 +641,9 @@ onUnmounted(() => {
 
 .slide-up-enter-active,
 .slide-up-leave-active {
-  transition: transform 0.25s ease, opacity 0.2s ease;
+  transition:
+    transform 0.25s ease,
+    opacity 0.2s ease;
 }
 .slide-up-enter-from,
 .slide-up-leave-to {
