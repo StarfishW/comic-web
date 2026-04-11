@@ -1,5 +1,6 @@
 <script setup>
 import AppHeader from './components/AppHeader.vue'
+import './utils/theme.js'
 </script>
 
 <template>

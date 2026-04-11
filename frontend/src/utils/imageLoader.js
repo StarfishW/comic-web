@@ -139,10 +139,4 @@ class ImageLoader {
   }
 }
 
-// 导出单例
-export const globalImageLoader = new ImageLoader({
-  maxConcurrent: 3,
-  sequential: false,
-})
-
 export default ImageLoader

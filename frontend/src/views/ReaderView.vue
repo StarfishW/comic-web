@@ -1,15 +1,14 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useRouter } from "vue-router";
-import { getChapterDetail, getChapterImageUrl } from "../api";
+import { getChapterDetail, getChapterImageUrl, startChapterCache, getChapterCacheStatus, getCachedImageUrl, getComicDetail } from "../api";
+import { startChapterPdf, getChapterPdfStatus, getChapterPdfDownloadUrl } from '../api'
 import LazyImage from "../components/LazyImage.vue";
 import ImageLoader from "../utils/imageLoader";
+import { viewMode } from '../utils/viewMode'
 
 // 图片加载配置
 const LOADING_CONFIG = {
-  priorityPages: 10, // 优先加载的页数
-  priorityDelay: 50, // 优先页面加载间隔（毫秒）
-  normalDelay: 500, // 普通页面加载间隔（毫秒）
   maxConcurrent: 5, // 最大并发数
 };
 
@@ -22,19 +21,245 @@ const error = ref(null);
 const mode = ref("scroll"); // 'scroll' | 'page'
 const currentPage = ref(0);
 const showToolbar = ref(true);
-const loadingProgress = ref(0);
 const imageLoader = new ImageLoader({
   maxConcurrent: LOADING_CONFIG.maxConcurrent,
   sequential: true,
 });
 const lazyImageRefs = ref([]);
+const scrollContainerRef = ref(null);
+const scrollPageRefs = ref([]);
 let loadingCancelled = false; // 用于取消加载
 
-let hideTimer = null;
+// 缩放
+const zoom = ref(1.0)
+const ZOOM_MIN = 0.5
+const ZOOM_MAX = 3.0
+const ZOOM_STEP = 0.25
+
+// 翻页模式下的拖拽平移（缩放 > 1 时可用）
+const panX = ref(0)
+const panY = ref(0)
+const isPanning = ref(false)
+let panStartX = 0
+let panStartY = 0
+let panOriginX = 0
+let panOriginY = 0
+const cacheStatus = ref(null)   // null | 'pending' | 'downloading' | 'ready' | 'error'
+const cacheProgress = ref(0)
+let cachePoller = null
+const pdfStatus = ref(null)    // null | 'caching' | 'converting' | 'ready' | 'error'
+const pdfProgress = ref(0)
+const pdfPhase = ref('')
+let pdfPoller = null
+let pdfDownloadTriggered = false
+
+function startCachePolling(albumId, photoId) {
+  if (cachePoller) clearInterval(cachePoller)
+  cachePoller = setInterval(async () => {
+    try {
+      const data = await getChapterCacheStatus(albumId, photoId)
+      cacheStatus.value = data.status
+      cacheProgress.value = data.progress || 0
+      if (data.status === 'ready' || data.status === 'error') {
+        clearInterval(cachePoller)
+        cachePoller = null
+      }
+    } catch {
+      clearInterval(cachePoller)
+      cachePoller = null
+    }
+  }, 1000)
+}
+
+function startPdfPolling(albumId, photoId) {
+  if (pdfPoller) clearInterval(pdfPoller)
+  pdfPoller = setInterval(async () => {
+    try {
+      const data = await getChapterPdfStatus(albumId, photoId)
+      pdfStatus.value = data.status
+      pdfProgress.value = data.progress || 0
+      pdfPhase.value = data.phase || ''
+      if (data.status === 'ready' || data.status === 'error') {
+        clearInterval(pdfPoller)
+        pdfPoller = null
+        if (data.status === 'ready' && !pdfDownloadTriggered) {
+          pdfDownloadTriggered = true
+          triggerPdfDownload(albumId, photoId)
+        }
+      }
+    } catch {
+      clearInterval(pdfPoller)
+      pdfPoller = null
+    }
+  }, 1000)
+}
+
+function triggerPdfDownload(albumId, photoId) {
+  const a = document.createElement('a')
+  a.href = getChapterPdfDownloadUrl(albumId, photoId)
+  a.download = `JMComic_${photoId}.pdf`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+}
+
+function zoomIn() {
+  zoom.value = Math.min(ZOOM_MAX, parseFloat((zoom.value + ZOOM_STEP).toFixed(2)))
+}
+function zoomOut() {
+  zoom.value = Math.max(ZOOM_MIN, parseFloat((zoom.value - ZOOM_STEP).toFixed(2)))
+  if (zoom.value <= 1) { panX.value = 0; panY.value = 0 }
+}
+function resetZoom() {
+  zoom.value = 1.0
+  panX.value = 0
+  panY.value = 0
+}
+
+// Ctrl + 滚轮缩放
+function handleWheel(e) {
+  if (!e.ctrlKey && !e.metaKey) return
+  e.preventDefault()
+  e.deltaY < 0 ? zoomIn() : zoomOut()
+}
+
+// 翻页模式双击切换 2x / 1x
+function handleDoubleClick(e) {
+  e.stopPropagation()
+  if (zoom.value !== 1.0) {
+    resetZoom()
+  } else {
+    zoom.value = 2.0
+  }
+}
+
+// 捏合缩放辅助
+function getTouchDist(touches) {
+  const dx = touches[0].clientX - touches[1].clientX
+  const dy = touches[0].clientY - touches[1].clientY
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+// ---- 翻页模式：拖拽平移 + 捏合缩放 ----
+let pinchStartDist = 0
+let pinchStartZoom = 1
+
+function onPanStart(e) {
+  if (e.touches && e.touches.length === 2) {
+    // 双指捏合开始
+    pinchStartDist = getTouchDist(e.touches)
+    pinchStartZoom = zoom.value
+    e.preventDefault()
+    return
+  }
+  if (zoom.value <= 1) return
+  isPanning.value = true
+  const p = e.touches ? e.touches[0] : e
+  panStartX = p.clientX
+  panStartY = p.clientY
+  panOriginX = panX.value
+  panOriginY = panY.value
+  e.preventDefault()
+}
+function onPanMove(e) {
+  if (e.touches && e.touches.length === 2) {
+    // 捏合缩放
+    e.preventDefault()
+    const dist = getTouchDist(e.touches)
+    const scale = dist / pinchStartDist
+    zoom.value = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
+      parseFloat((pinchStartZoom * scale).toFixed(2))
+    ))
+    if (zoom.value <= 1) { panX.value = 0; panY.value = 0 }
+    return
+  }
+  if (!isPanning.value) return
+  e.preventDefault()
+  const p = e.touches ? e.touches[0] : e
+  panX.value = panOriginX + (p.clientX - panStartX)
+  panY.value = panOriginY + (p.clientY - panStartY)
+}
+function onPanEnd(e) {
+  if (e?.touches?.length === 0 || !e?.touches) {
+    isPanning.value = false
+    pinchStartDist = 0
+  }
+}
+
+// ---- 滚动模式：捏合缩放 ----
+let scrollPinchActive = false
+let scrollPinchStartDist = 0
+let scrollPinchStartZoom = 1
+
+function onScrollTouchStart(e) {
+  if (e.touches.length === 2) {
+    scrollPinchActive = true
+    scrollPinchStartDist = getTouchDist(e.touches)
+    scrollPinchStartZoom = zoom.value
+    e.preventDefault()
+  }
+}
+function onScrollTouchMove(e) {
+  if (!scrollPinchActive || e.touches.length !== 2) return
+  e.preventDefault()
+  const dist = getTouchDist(e.touches)
+  zoom.value = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
+    parseFloat((scrollPinchStartZoom * dist / scrollPinchStartDist).toFixed(2))
+  ))
+}
+function onScrollTouchEnd(e) {
+  if (e.touches.length < 2) scrollPinchActive = false
+}
+
+// 滚动模式下追踪当前页
+function handleScroll() {
+  if (!scrollContainerRef.value) return;
+  const container = scrollContainerRef.value;
+  const midPoint = container.scrollTop + container.clientHeight / 2;
+  let closest = 0;
+  let minDist = Infinity;
+  scrollPageRefs.value.forEach((el, i) => {
+    if (!el) return;
+    const center = el.offsetTop + el.offsetHeight / 2;
+    const dist = Math.abs(center - midPoint);
+    if (dist < minDist) {
+      minDist = dist;
+      closest = i;
+    }
+  });
+  currentPage.value = closest;
+}
 
 const totalPages = computed(() => chapter.value?.images?.length || 0);
+const albumId = computed(() => chapter.value?.album_id || '')
+
+const episodeList = ref([])
+
+const currentEpisodeIndex = computed(() =>
+  episodeList.value.findIndex(ep => ep.id === props.photoId)
+)
+const prevEpisode = computed(() =>
+  currentEpisodeIndex.value > 0 ? episodeList.value[currentEpisodeIndex.value - 1] : null
+)
+const nextEpisode = computed(() =>
+  currentEpisodeIndex.value !== -1 && currentEpisodeIndex.value < episodeList.value.length - 1
+    ? episodeList.value[currentEpisodeIndex.value + 1]
+    : null
+)
+
+function epTitle(ep) {
+  return ep?.title || `第${ep?.sort}话`
+}
+
+function goToEpisode(ep) {
+  if (!ep) return
+  router.push({ name: 'Reader', params: { photoId: ep.id } })
+}
 
 function getImageSrc(index) {
+  if (viewMode.value === 'cache' && cacheStatus.value === 'ready') {
+    return getCachedImageUrl(albumId.value, props.photoId, index)
+  }
   return getChapterImageUrl(props.photoId, index);
 }
 
@@ -42,12 +267,60 @@ async function fetchChapter() {
   try {
     loading.value = true;
     error.value = null;
-    loadingProgress.value = 0;
     loadingCancelled = false;
+    resetZoom()
     imageLoader.clear();
     lazyImageRefs.value = []; // 清空旧的 refs
+    scrollPageRefs.value = []; // 清空旧的 DOM 引用
+    cacheStatus.value = null
+    cacheProgress.value = 0
+    if (cachePoller) { clearInterval(cachePoller); cachePoller = null }
+    pdfStatus.value = null
+    pdfProgress.value = 0
+    pdfPhase.value = ''
+    pdfDownloadTriggered = false
+    if (pdfPoller) { clearInterval(pdfPoller); pdfPoller = null }
 
     chapter.value = await getChapterDetail(props.photoId);
+
+    // 后台拉取本漫画章节列表（不 await，不影响加载速度）
+    if (chapter.value.album_id) {
+      episodeList.value = [] // 重置，防止上一章节残留
+      getComicDetail(chapter.value.album_id)
+        .then(data => { episodeList.value = data.episodes || [] })
+        .catch(() => {})
+    }
+
+    // 缓存模式处理
+    if (viewMode.value === 'cache') {
+      const statusData = await getChapterCacheStatus(albumId.value, props.photoId)
+      if (statusData.status === 'ready') {
+        cacheStatus.value = 'ready'
+        cacheProgress.value = 100
+      } else {
+        cacheStatus.value = statusData.status === 'not_started' ? 'pending' : statusData.status
+        cacheProgress.value = statusData.progress || 0
+        await startChapterCache(albumId.value, props.photoId)
+        startCachePolling(albumId.value, props.photoId)
+      }
+    } else if (viewMode.value === 'pdf') {
+      const statusData = await getChapterPdfStatus(albumId.value, props.photoId)
+      if (statusData.status === 'ready') {
+        pdfStatus.value = 'ready'
+        pdfProgress.value = 100
+        if (!pdfDownloadTriggered) {
+          pdfDownloadTriggered = true
+          triggerPdfDownload(albumId.value, props.photoId)
+        }
+      } else {
+        pdfStatus.value = 'caching'
+        await startChapterPdf(albumId.value, props.photoId)
+        startPdfPolling(albumId.value, props.photoId)
+      }
+    } else {
+      cacheStatus.value = 'ready'
+    }
+
     currentPage.value = 0;
 
     // 等待 DOM 更新后开始顺序加载
@@ -70,92 +343,36 @@ async function fetchChapter() {
   }
 }
 
-// 顺序加载图片 - 优化版：支持并发加载
+// 顺序加载图片 - 纯并发槽控制，无延迟
 function startSequentialLoading() {
   const images = chapter.value?.images || [];
-  let currentIndex = 0;
-  let loadingCount = 0; // 当前正在加载的数量
-  let completedCount = 0; // 已完成的数量
-  loadingCancelled = false; // 重置取消标志
+  if (!images.length || lazyImageRefs.value.length === 0) return;
 
-  console.log('[加载] 开始顺序加载', {
-    totalImages: images.length,
-    refsCount: lazyImageRefs.value.length,
-    maxConcurrent: LOADING_CONFIG.maxConcurrent,
-  });
+  loadingCancelled = false;
+  let nextIndex = 0;
+  let completed = 0;
+  const total = images.length;
 
-  // 检查 refs 是否正确设置
-  if (lazyImageRefs.value.length === 0) {
-    console.error('[加载] lazyImageRefs 为空，无法加载图片！');
-    return;
-  }
+  function tryLoadNext() {
+    if (loadingCancelled || nextIndex >= total) return;
+    const i = nextIndex++;
+    const ref = lazyImageRefs.value[i];
 
-  function loadNext() {
-    // 检查是否已取消或已完成所有加载
-    if (loadingCancelled || currentIndex >= images.length) return;
-
-    // 控制并发数：确保不超过 maxConcurrent
-    while (
-      loadingCount < LOADING_CONFIG.maxConcurrent &&
-      currentIndex < images.length &&
-      !loadingCancelled
-    ) {
-      const indexToLoad = currentIndex;
-      currentIndex++;
-      loadingCount++;
-
-      const ref = lazyImageRefs.value[indexToLoad];
-      if (ref && !ref.isLoaded) {
-        // 计算延迟：前N页快速，后续慢速
-        const delay =
-          indexToLoad < LOADING_CONFIG.priorityPages
-            ? LOADING_CONFIG.priorityDelay * indexToLoad
-            : LOADING_CONFIG.priorityDelay * LOADING_CONFIG.priorityPages +
-              LOADING_CONFIG.normalDelay *
-                (indexToLoad - LOADING_CONFIG.priorityPages);
-
-        setTimeout(() => {
-          if (loadingCancelled) {
-            loadingCount--;
-            return;
-          }
-
-          console.log(`[加载] 开始加载第 ${indexToLoad + 1} 页`);
-
-          ref
-            .loadImage()
-            .then(() => {
-              if (loadingCancelled) return;
-              completedCount++;
-              loadingCount--;
-              loadingProgress.value = (completedCount / images.length) * 100;
-              console.log(`[加载] 第 ${indexToLoad + 1} 页加载成功，进度: ${loadingProgress.value.toFixed(1)}%`);
-              // 继续加载下一批
-              loadNext();
-            })
-            .catch(() => {
-              if (loadingCancelled) return;
-              completedCount++;
-              loadingCount--;
-              console.error(`[加载] 第 ${indexToLoad + 1} 页加载失败`);
-              // 加载失败也继续
-              loadNext();
-            });
-        }, delay);
-      } else {
-        // 已加载或无效，直接跳过
-        if (!ref) {
-          console.warn(`[加载] 第 ${indexToLoad + 1} 页的 ref 不存在`);
-        }
-        loadingCount--;
-        completedCount++;
-        loadingProgress.value = (completedCount / images.length) * 100;
-      }
+    function onDone() {
+      if (loadingCancelled) return;
+      completed++;
+      tryLoadNext();
     }
+
+    if (!ref || ref.isLoaded) {
+      onDone();
+      return;
+    }
+    ref.loadImage().then(onDone).catch(onDone);
   }
 
-  // 开始加载
-  loadNext();
+  const concurrency = Math.min(LOADING_CONFIG.maxConcurrent, total);
+  for (let i = 0; i < concurrency; i++) tryLoadNext();
 }
 
 // 取消顺序加载
@@ -219,8 +436,17 @@ function toggleToolbar() {
 
 function handleKeydown(e) {
   if (mode.value !== "page") return;
-  if (e.key === "ArrowLeft" || e.key === "ArrowUp") prevPage();
-  if (e.key === "ArrowRight" || e.key === "ArrowDown") nextPage();
+  if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+    if (currentPage.value === 0 && prevEpisode.value) goToEpisode(prevEpisode.value)
+    else prevPage()
+  }
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+    if (currentPage.value >= totalPages.value - 1 && nextEpisode.value) goToEpisode(nextEpisode.value)
+    else nextPage()
+  }
+  if (e.key === '+' || e.key === '=') zoomIn()
+  if (e.key === '-') zoomOut()
+  if (e.key === '0') resetZoom()
 }
 
 watch(() => props.photoId, fetchChapter);
@@ -252,6 +478,8 @@ onUnmounted(() => {
   document.removeEventListener("keydown", handleKeydown);
   cancelSequentialLoading();
   imageLoader.clear();
+  if (cachePoller) clearInterval(cachePoller)
+  if (pdfPoller) clearInterval(pdfPoller)
 });
 </script>
 
@@ -290,18 +518,78 @@ onUnmounted(() => {
       </div>
     </transition>
 
-    <!-- Loading Progress Bar -->
-    <transition name="fade">
-      <div
-        v-if="mode === 'scroll' && loadingProgress > 0 && loadingProgress < 100"
-        class="progress-bar"
-      >
-        <div
-          class="progress-fill"
-          :style="{ width: loadingProgress + '%' }"
-        ></div>
+    <!-- Cache Mode Overlay -->
+    <div
+      v-if="viewMode === 'cache' && cacheStatus !== 'ready' && !loading"
+      class="cache-overlay"
+      @click.stop
+    >
+      <div v-if="cacheStatus === 'error'" class="cache-message">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <p>缓存失败，请返回重试</p>
       </div>
-    </transition>
+      <div v-else class="cache-message">
+        <div class="cache-spinner"></div>
+        <p class="cache-text">正在缓存章节</p>
+        <div class="cache-bar-wrap">
+          <div class="cache-bar-fill" :style="{ width: cacheProgress + '%' }"></div>
+        </div>
+        <span class="cache-pct">{{ cacheProgress }}%</span>
+      </div>
+    </div>
+
+    <!-- PDF Mode Overlay -->
+    <div
+      v-if="viewMode === 'pdf' && pdfStatus !== 'ready' && !loading"
+      class="cache-overlay"
+      @click.stop
+    >
+      <div v-if="pdfStatus === 'error'" class="cache-message">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        <p>PDF 生成失败，请返回重试</p>
+        <button class="retry-btn" @click="goBack">返回</button>
+      </div>
+      <div v-else class="cache-message">
+        <div class="cache-spinner"></div>
+        <p class="cache-text">
+          {{ pdfPhase === 'converting' ? '正在合成 PDF...' : '正在下载图片...' }}
+        </p>
+        <div class="cache-bar-wrap">
+          <div class="cache-bar-fill" :style="{ width: pdfProgress + '%' }"></div>
+        </div>
+        <span class="cache-pct">{{ pdfProgress }}%</span>
+      </div>
+    </div>
+
+    <!-- PDF Ready Overlay -->
+    <div
+      v-if="viewMode === 'pdf' && pdfStatus === 'ready' && !loading"
+      class="cache-overlay"
+      @click.stop
+    >
+      <div class="cache-message">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" stroke-width="1.5">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <polyline points="9 12 11 14 15 10" stroke="var(--color-primary)" stroke-width="2"/>
+        </svg>
+        <p class="cache-text" style="color: rgba(255,255,255,0.9)">PDF 已生成，正在下载</p>
+        <a
+          :href="getChapterPdfDownloadUrl(albumId, photoId)"
+          :download="`JMComic_${photoId}.pdf`"
+          class="pdf-manual-link"
+        >如未自动下载，点此下载</a>
+        <button class="retry-btn" style="margin-top:8px" @click="goBack">返回</button>
+      </div>
+    </div>
 
     <!-- Loading -->
     <div v-if="loading" class="loading-state">
@@ -316,49 +604,93 @@ onUnmounted(() => {
     </div>
 
     <!-- Scroll Mode -->
-    <div v-else-if="mode === 'scroll'" class="scroll-container">
-      <div v-for="(img, i) in chapter.images" :key="i" class="scroll-page">
-        <LazyImage
-          :ref="
-            (el) => {
-              if (el) lazyImageRefs[i] = el;
-            }
-          "
-          :src="getImageSrc(i)"
-          :alt="`第${i + 1}页`"
-          :sequential="true"
-          class="page-img"
-          @visible="handleImageVisible(i)"
-        />
-        <span class="page-num">{{ i + 1 }} / {{ totalPages }}</span>
+    <template v-else-if="mode === 'scroll'">
+      <div
+        ref="scrollContainerRef"
+        class="scroll-container"
+        v-show="(viewMode === 'direct') || (viewMode === 'cache' && cacheStatus === 'ready')"
+        @scroll="handleScroll"
+        @wheel="handleWheel"
+        @touchstart="onScrollTouchStart"
+        @touchmove="onScrollTouchMove"
+        @touchend="onScrollTouchEnd"
+      >
+        <div v-for="(img, i) in chapter.images" :key="i" :ref="(el) => { if (el) scrollPageRefs[i] = el }" class="scroll-page" :style="{ maxWidth: `${800 * zoom}px` }">
+          <LazyImage
+            :ref="
+              (el) => {
+                if (el) lazyImageRefs[i] = el;
+              }
+            "
+            :src="getImageSrc(i)"
+            :alt="`第${i + 1}页`"
+            :sequential="true"
+            class="page-img"
+            @visible="handleImageVisible(i)"
+          />
+        </div>
+
+        <!-- 章节导航（滚动到底部后可见） -->
+        <div v-if="prevEpisode || nextEpisode" class="episode-nav-scroll">
+          <button v-if="prevEpisode" class="ep-nav-btn" @click="goToEpisode(prevEpisode)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+            上一话：{{ epTitle(prevEpisode) }}
+          </button>
+          <button v-if="nextEpisode" class="ep-nav-btn ep-nav-next" @click="goToEpisode(nextEpisode)">
+            下一话：{{ epTitle(nextEpisode) }}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
       </div>
-    </div>
+    </template>
 
     <!-- Page Mode -->
-    <div v-else class="page-container" @click.stop>
-      <div class="page-viewer">
-        <LazyImage
-          :src="getImageSrc(currentPage)"
-          :alt="`第${currentPage + 1}页`"
-          :sequential="false"
-          class="page-img-single"
-        />
+    <template v-else>
+      <div
+        class="page-container"
+        v-show="(viewMode === 'direct') || (viewMode === 'cache' && cacheStatus === 'ready')"
+        @click.stop
+      >
+        <div
+          class="page-viewer"
+          :style="{
+            transform: `scale(${zoom}) translate(${panX / zoom}px, ${panY / zoom}px)`,
+            cursor: zoom > 1 ? (isPanning ? 'grabbing' : 'grab') : 'default',
+            transformOrigin: 'center center',
+          }"
+          @dblclick="handleDoubleClick"
+          @mousedown="onPanStart"
+          @mousemove="onPanMove"
+          @mouseup="onPanEnd"
+          @mouseleave="onPanEnd"
+          @touchstart="onPanStart"
+          @touchmove="onPanMove"
+          @touchend="onPanEnd"
+          @wheel.prevent="handleWheel"
+        >
+          <LazyImage
+            :src="getImageSrc(currentPage)"
+            :alt="`第${currentPage + 1}页`"
+            :sequential="false"
+            class="page-img-single"
+          />
+        </div>
+        <div class="page-nav" @click.stop>
+          <button
+            class="page-area left"
+            @click="prevPage"
+            :disabled="currentPage === 0"
+            aria-label="上一页"
+          ></button>
+          <button
+            class="page-area right"
+            @click="nextPage"
+            :disabled="currentPage >= totalPages - 1"
+            aria-label="下一页"
+          ></button>
+        </div>
       </div>
-      <div class="page-nav" @click.stop>
-        <button
-          class="page-area left"
-          @click="prevPage"
-          :disabled="currentPage === 0"
-          aria-label="上一页"
-        ></button>
-        <button
-          class="page-area right"
-          @click="nextPage"
-          :disabled="currentPage >= totalPages - 1"
-          aria-label="下一页"
-        ></button>
-      </div>
-    </div>
+    </template>
 
     <!-- Bottom Toolbar -->
     <transition name="slide-up">
@@ -367,10 +699,37 @@ onUnmounted(() => {
         class="toolbar bottom-bar"
         @click.stop
       >
-        <span class="page-info"
-          >{{ mode === "page" ? currentPage + 1 : "—" }} /
-          {{ totalPages }}</span
-        >
+        <div class="zoom-controls" @click.stop>
+          <button class="zoom-btn" @click="zoomOut" :disabled="zoom <= ZOOM_MIN" title="缩小 (-)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+          <button class="zoom-pct" @click="resetZoom" title="重置缩放">{{ Math.round(zoom * 100) }}%</button>
+          <button class="zoom-btn" @click="zoomIn" :disabled="zoom >= ZOOM_MAX" title="放大 (+)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+        </div>
+        <span class="page-info">{{ currentPage + 1 }} / {{ totalPages }}</span>
+        <!-- 翻页模式章节导航 -->
+        <div v-if="mode === 'page'" class="episode-nav-page">
+          <button
+            v-if="currentPage === 0 && prevEpisode"
+            class="ep-nav-page-btn"
+            @click="goToEpisode(prevEpisode)"
+            :title="`上一话：${epTitle(prevEpisode)}`"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/><polyline points="8 18 2 12 8 6"/></svg>
+            上一话
+          </button>
+          <button
+            v-if="currentPage >= totalPages - 1 && nextEpisode"
+            class="ep-nav-page-btn ep-nav-page-next"
+            @click="goToEpisode(nextEpisode)"
+            :title="`下一话：${epTitle(nextEpisode)}`"
+          >
+            下一话
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/><polyline points="16 18 22 12 16 6"/></svg>
+          </button>
+        </div>
         <input
           v-if="mode === 'page'"
           type="range"
@@ -413,27 +772,11 @@ onUnmounted(() => {
   top: 0;
 }
 
-/* Loading Progress Bar */
-.progress-bar {
-  position: absolute;
-  top: 56px;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: rgba(255, 255, 255, 0.1);
-  z-index: 10;
-}
-
-.progress-fill {
-  height: 100%;
-  background: var(--color-primary);
-  transition: width 0.3s ease;
-}
-
 .bottom-bar {
   bottom: 0;
-  justify-content: center;
-  gap: 16px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px;
 }
 
 .tool-btn {
@@ -504,6 +847,7 @@ onUnmounted(() => {
   position: relative;
   max-width: 800px;
   margin: 0 auto;
+  min-height: 200px;
 }
 
 .page-img {
@@ -511,8 +855,14 @@ onUnmounted(() => {
   display: block;
 }
 
+.page-img :deep(.lazy-image-wrapper) {
+  height: auto;
+}
+
 .page-img :deep(.lazy-image) {
   display: block;
+  height: auto;
+  object-fit: initial;
 }
 
 .page-img-single :deep(.lazy-image-wrapper) {
@@ -526,17 +876,6 @@ onUnmounted(() => {
   max-height: calc(100vh - 120px);
   max-width: 100%;
   object-fit: contain;
-}
-
-.page-num {
-  position: absolute;
-  bottom: 8px;
-  right: 12px;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.5);
-  background: rgba(0, 0, 0, 0.5);
-  padding: 2px 8px;
-  border-radius: 4px;
 }
 
 /* Page mode */
@@ -649,5 +988,169 @@ onUnmounted(() => {
 .slide-up-leave-to {
   transform: translateY(100%);
   opacity: 0;
+}
+
+/* Cache overlay */
+.cache-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: rgba(17, 17, 17, 0.95);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cache-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.cache-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.cache-text {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.cache-bar-wrap {
+  width: 200px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.cache-bar-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.cache-pct {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-manual-link {
+  font-size: 13px;
+  color: var(--color-primary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* 缩放控件 */
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.zoom-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.7);
+  transition: background 0.15s, color 0.15s;
+}
+.zoom-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+.zoom-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.zoom-pct {
+  min-width: 44px;
+  height: 28px;
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  font-variant-numeric: tabular-nums;
+  border-radius: 4px;
+  transition: background 0.15s;
+  text-align: center;
+}
+.zoom-pct:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+/* 章节导航 - 滚动模式底部 */
+.episode-nav-scroll {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 24px 16px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ep-nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 20px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-md);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+}
+.ep-nav-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+.ep-nav-next {
+  justify-content: flex-end;
+}
+
+/* 章节导航 - 翻页模式底部工具栏 */
+.episode-nav-page {
+  display: flex;
+  gap: 6px;
+}
+
+.ep-nav-page-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 14px;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.ep-nav-page-btn:hover {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
 }
 </style>

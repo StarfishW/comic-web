@@ -1,6 +1,8 @@
 <script setup>
-import { ref, onMounted, watch } from 'vue'
-import { getCoverUrl, getComicDetail, addFavorite } from '../api'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { getCoverUrl, getComicDetail, addFavorite, startChapterCache, getChapterCacheStatus, getAlbumCacheStatus } from '../api'
+import { addHistory } from '../utils/history'
+import { registerMeta, startPolling as startGlobalPolling } from '../utils/cacheQueue'
 import LazyImage from '../components/LazyImage.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
@@ -10,11 +12,19 @@ const loading = ref(true)
 const error = ref(null)
 const favoriteLoading = ref(false)
 
+// 缓存管理
+const cacheMode = ref(false)           // 是否处于缓存选择模式
+const selectedIds = ref(new Set())     // 选中的 episode id 集合
+const cacheStatusMap = ref({})         // { [photoId]: { status, progress } }
+let cachePoller = null
+
 async function fetchComic() {
   try {
     loading.value = true
     error.value = null
     comic.value = await getComicDetail(props.id)
+    addHistory({ id: props.id, title: comic.value.title, author: comic.value.author || '' })
+    loadCacheStatus()
   } catch (e) {
     error.value = '加载失败: ' + (e.response?.data?.detail || e.message)
   } finally {
@@ -34,6 +44,119 @@ async function handleFavorite() {
     favoriteLoading.value = false
   }
 }
+
+function toggleCacheMode() {
+  cacheMode.value = !cacheMode.value
+  if (!cacheMode.value) {
+    selectedIds.value = new Set()
+  }
+}
+
+function toggleSelect(id) {
+  const s = new Set(selectedIds.value)
+  s.has(id) ? s.delete(id) : s.add(id)
+  selectedIds.value = s
+}
+
+function selectAll() {
+  selectedIds.value = new Set((comic.value?.episodes || []).map(ep => ep.id))
+}
+
+function clearSelect() {
+  selectedIds.value = new Set()
+}
+
+async function startCaching() {
+  if (!selectedIds.value.size) return
+  const albumId = props.id
+  const ids = [...selectedIds.value]
+
+  // 注册元数据供顶部缓存队列面板显示
+  const albumTitle = comic.value?.title || props.id
+  ids.forEach(id => {
+    const ep = comic.value?.episodes?.find(e => e.id === id)
+    registerMeta(id, {
+      albumId: props.id,
+      albumTitle,
+      chapterTitle: ep ? (ep.title || `第${ep.sort}话`) : id,
+    })
+  })
+
+  // 初始化状态
+  const map = { ...cacheStatusMap.value }
+  ids.forEach(id => { map[id] = { status: 'pending', progress: 0 } })
+  cacheStatusMap.value = map
+
+  // 并发触发（限制并发为 3）
+  const chunks = []
+  for (let i = 0; i < ids.length; i += 3) chunks.push(ids.slice(i, i + 3))
+  for (const chunk of chunks) {
+    await Promise.allSettled(chunk.map(id => {
+      const ep = comic.value?.episodes?.find(e => e.id === id)
+      return startChapterCache(albumId, id, {
+        album_title: comic.value?.title || '',
+        author: comic.value?.author || '',
+        chapter_title: ep ? (ep.title || `第${ep.sort}话`) : '',
+      })
+    }))
+  }
+
+  // 退出选择模式，开始轮询
+  cacheMode.value = false
+  selectedIds.value = new Set()
+  startPolling(albumId)
+  startGlobalPolling() // 触发全局队列面板轮询（无参数，来自 cacheQueue.js）
+}
+
+async function loadCacheStatus() {
+  try {
+    const data = await getAlbumCacheStatus(props.id)
+    // data 格式：{ [photoId]: { status, progress } }
+    // 只保留有实际状态的章节（not_started 不会出现在结果中）
+    const map = {}
+    Object.entries(data).forEach(([photoId, info]) => {
+      map[photoId] = { status: info.status, progress: info.progress }
+    })
+    // 合并：不覆盖本次会话已有的更新状态
+    cacheStatusMap.value = { ...map, ...cacheStatusMap.value }
+
+    // 如果有正在进行中的任务，启动轮询
+    const hasActive = Object.values(cacheStatusMap.value).some(
+      v => v.status === 'pending' || v.status === 'downloading'
+    )
+    if (hasActive) startPolling(props.id)
+  } catch {
+    // 静默失败，不影响页面正常显示
+  }
+}
+
+function startPolling(albumId) {
+  if (cachePoller) clearInterval(cachePoller)
+  cachePoller = setInterval(async () => {
+    const pendingIds = Object.entries(cacheStatusMap.value)
+      .filter(([, v]) => v.status === 'pending' || v.status === 'downloading')
+      .map(([id]) => id)
+
+    if (!pendingIds.length) {
+      clearInterval(cachePoller)
+      cachePoller = null
+      return
+    }
+
+    const results = await Promise.allSettled(
+      pendingIds.map(id => getChapterCacheStatus(albumId, id))
+    )
+    const map = { ...cacheStatusMap.value }
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        map[pendingIds[i]] = { status: r.value.status, progress: r.value.progress }
+      }
+    })
+    cacheStatusMap.value = map
+  }, 2000)
+}
+
+onUnmounted(() => { if (cachePoller) clearInterval(cachePoller) })
 
 watch(() => props.id, fetchComic)
 onMounted(fetchComic)
@@ -107,17 +230,73 @@ onMounted(fetchComic)
 
         <!-- Chapter List -->
         <section v-if="comic.episodes && comic.episodes.length" class="chapter-section">
-          <h2 class="section-title">章节列表 ({{ comic.episodes.length }})</h2>
+          <div class="chapter-header">
+            <h2 class="section-title">章节列表 ({{ comic.episodes.length }})</h2>
+            <div class="chapter-actions">
+              <template v-if="cacheMode">
+                <button class="act-btn" @click="selectAll">全选</button>
+                <button class="act-btn" @click="clearSelect">清空</button>
+                <button
+                  class="act-btn act-btn-primary"
+                  :disabled="!selectedIds.size"
+                  @click="startCaching"
+                >缓存 ({{ selectedIds.size }})</button>
+                <button class="act-btn" @click="toggleCacheMode">取消</button>
+              </template>
+              <button v-else class="act-btn" @click="toggleCacheMode">管理缓存</button>
+            </div>
+          </div>
+
           <div class="chapter-grid">
-            <router-link
+            <div
               v-for="ep in comic.episodes"
               :key="ep.id"
-              :to="{ name: 'Reader', params: { photoId: ep.id } }"
-              class="chapter-item"
+              :class="['chapter-item', {
+                'is-selected': cacheMode && selectedIds.has(ep.id),
+                'is-cached': cacheStatusMap[ep.id]?.status === 'ready',
+                'is-caching': cacheStatusMap[ep.id]?.status === 'downloading' || cacheStatusMap[ep.id]?.status === 'pending',
+                'is-error': cacheStatusMap[ep.id]?.status === 'error',
+              }]"
+              @click="cacheMode ? toggleSelect(ep.id) : null"
             >
-              <span class="ep-sort">{{ ep.sort }}</span>
-              <span class="ep-title">{{ ep.title || `第${ep.sort}话` }}</span>
-            </router-link>
+              <!-- 缓存模式：复选框 -->
+              <span v-if="cacheMode" class="ep-checkbox">
+                <svg v-if="selectedIds.has(ep.id)" width="16" height="16" viewBox="0 0 16 16" fill="var(--color-primary)">
+                  <rect width="16" height="16" rx="3"/>
+                  <path d="M4 8l3 3 5-5" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+                </svg>
+                <svg v-else width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--color-border)" stroke-width="1.5">
+                  <rect x="0.75" y="0.75" width="14.5" height="14.5" rx="2.5"/>
+                </svg>
+              </span>
+
+              <!-- 非缓存模式：点击跳转 -->
+              <router-link
+                v-if="!cacheMode"
+                :to="{ name: 'Reader', params: { photoId: ep.id } }"
+                class="ep-link"
+              >
+                <span class="ep-sort">{{ ep.sort }}</span>
+                <span class="ep-title">{{ ep.title || `第${ep.sort}话` }}</span>
+                <!-- 缓存状态图标 -->
+                <span v-if="cacheStatusMap[ep.id]" class="ep-status">
+                  <span v-if="cacheStatusMap[ep.id].status === 'ready'" class="status-icon status-ready">✓</span>
+                  <span v-else-if="cacheStatusMap[ep.id].status === 'error'" class="status-icon status-error">✕</span>
+                  <span v-else class="status-icon status-loading">{{ cacheStatusMap[ep.id].progress }}%</span>
+                </span>
+              </router-link>
+
+              <!-- 缓存模式下的内容 -->
+              <template v-else>
+                <span class="ep-sort">{{ ep.sort }}</span>
+                <span class="ep-title">{{ ep.title || `第${ep.sort}话` }}</span>
+                <span v-if="cacheStatusMap[ep.id]" class="ep-status">
+                  <span v-if="cacheStatusMap[ep.id].status === 'ready'" class="status-icon status-ready">✓</span>
+                  <span v-else-if="cacheStatusMap[ep.id].status === 'error'" class="status-icon status-error">✕</span>
+                  <span v-else class="status-icon status-loading">{{ cacheStatusMap[ep.id].progress }}%</span>
+                </span>
+              </template>
+            </div>
           </div>
         </section>
       </template>
@@ -283,7 +462,6 @@ onMounted(fetchComic)
 .section-title {
   font-size: 18px;
   font-weight: 700;
-  margin-bottom: 16px;
   color: var(--color-text);
 }
 
@@ -368,7 +546,7 @@ onMounted(fetchComic)
 }
 
 .shimmer {
-  background: linear-gradient(90deg, var(--color-border) 25%, #f1f5f9 50%, var(--color-border) 75%);
+  background: linear-gradient(90deg, var(--color-border) 25%, var(--color-shimmer-highlight) 50%, var(--color-border) 75%);
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
 }
@@ -393,6 +571,104 @@ onMounted(fetchComic)
   font-weight: 500;
   cursor: pointer;
 }
+
+.chapter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chapter-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.act-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-bg);
+  transition: all 0.2s;
+  cursor: pointer;
+}
+
+.act-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.act-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.act-btn-primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+.act-btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+  color: #fff;
+}
+
+/* 章节卡片状态 */
+.chapter-item {
+  position: relative;
+  cursor: pointer;
+}
+
+.chapter-item.is-selected {
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.chapter-item.is-cached {
+  border-color: #16a34a;
+}
+
+.chapter-item.is-caching {
+  border-color: #d97706;
+}
+
+.chapter-item.is-error {
+  border-color: #dc2626;
+}
+
+.ep-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  color: inherit;
+  text-decoration: none;
+}
+
+.ep-checkbox {
+  flex-shrink: 0;
+}
+
+.ep-status {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.status-icon {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status-ready { color: #16a34a; }
+.status-error { color: #dc2626; }
+.status-loading { color: #d97706; font-size: 10px; }
 
 @media (max-width: 640px) {
   .detail-header {

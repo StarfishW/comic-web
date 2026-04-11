@@ -2,6 +2,8 @@
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { pingDomains, switchDomain } from '../api'
+import { placeholderStyle, setPlaceholderStyle, PLACEHOLDER_STYLES } from '../utils/placeholder'
+import { viewMode, setViewMode } from '../utils/viewMode'
 
 const router = useRouter()
 const loading = ref(false)
@@ -125,6 +127,79 @@ onMounted(fetchPing)
 
         <div v-else class="empty-state">
           <p>暂无域名数据，点击刷新延迟进行检测</p>
+        </div>
+      </div>
+
+      <!-- 外观设置 -->
+      <div class="section">
+        <h2 class="section-title">外观设置</h2>
+        <p class="section-desc">选择图片加载完成前的占位样式。</p>
+        <div class="placeholder-options">
+          <button
+            v-for="s in PLACEHOLDER_STYLES"
+            :key="s.key"
+            :class="['placeholder-option', { active: placeholderStyle === s.key }]"
+            @click="setPlaceholderStyle(s.key)"
+          >
+            <div :class="['placeholder-preview', `preview-${s.key}`]"></div>
+            <span class="placeholder-label">{{ s.label }}</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 观看模式 -->
+      <div class="section">
+        <h2 class="section-title">观看模式</h2>
+        <p class="section-desc">选择进入阅读器时的图片加载方式。</p>
+        <div class="mode-options">
+          <button
+            :class="['mode-option', { active: viewMode === 'direct' }]"
+            @click="setViewMode('direct')"
+          >
+            <div class="mode-icon">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="12" cy="12" r="10"/>
+                <polygon points="10 8 16 12 10 16 10 8" fill="currentColor" stroke="none"/>
+              </svg>
+            </div>
+            <div class="mode-info">
+              <span class="mode-name">直接观看</span>
+              <span class="mode-desc">实时加载，立即开始阅读</span>
+            </div>
+          </button>
+          <button
+            :class="['mode-option', { active: viewMode === 'cache' }]"
+            @click="setViewMode('cache')"
+          >
+            <div class="mode-icon">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </div>
+            <div class="mode-info">
+              <span class="mode-name">缓存后观看</span>
+              <span class="mode-desc">预先下载全章节，流畅无卡顿</span>
+            </div>
+          </button>
+          <button
+            :class="['mode-option', { active: viewMode === 'pdf' }]"
+            @click="setViewMode('pdf')"
+          >
+            <div class="mode-icon">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="9" y1="13" x2="15" y2="13"/>
+                <line x1="9" y1="17" x2="13" y2="17"/>
+              </svg>
+            </div>
+            <div class="mode-info">
+              <span class="mode-name">PDF 下载</span>
+              <span class="mode-desc">合成为 PDF 文件并下载到本地</span>
+            </div>
+          </button>
         </div>
       </div>
 
@@ -272,7 +347,7 @@ onMounted(fetchPing)
   border-radius: 4px;
   width: 60%;
   animation: shimmer 1.5s infinite;
-  background: linear-gradient(90deg, var(--color-border) 25%, #f1f5f9 50%, var(--color-border) 75%);
+  background: linear-gradient(90deg, var(--color-border) 25%, var(--color-shimmer-highlight) 50%, var(--color-border) 75%);
   background-size: 200% 100%;
 }
 
@@ -420,6 +495,139 @@ onMounted(fetchPing)
 
 .logout-btn svg {
   flex-shrink: 0;
+}
+
+.placeholder-options {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.placeholder-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.placeholder-option:hover {
+  border-color: var(--color-primary);
+}
+
+.placeholder-option.active {
+  border-color: var(--color-primary);
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.placeholder-preview {
+  width: 60px;
+  height: 80px;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.preview-icon-dark  { background: #262626; position: relative; }
+.preview-icon-light { background: #f0f0f0; position: relative; }
+.preview-solid-dark { background: #262626; }
+.preview-solid-light { background: #e5e7eb; }
+
+/* icon-dark / icon-light 用伪元素模拟相机图标 */
+.preview-icon-dark::after,
+.preview-icon-light::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23555' stroke-width='1.5'%3E%3Crect x='3' y='7' width='18' height='13' rx='2'/%3E%3Ccircle cx='12' cy='13' r='3'/%3E%3Cpath d='M8 7V5h8v2'/%3E%3C/svg%3E");
+  background-size: 40px 40px;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.preview-icon-light::after {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23bbb' stroke-width='1.5'%3E%3Crect x='3' y='7' width='18' height='13' rx='2'/%3E%3Ccircle cx='12' cy='13' r='3'/%3E%3Cpath d='M8 7V5h8v2'/%3E%3C/svg%3E");
+}
+
+/* shimmer 预览动画 */
+.preview-shimmer {
+  background: #e5e7eb;
+  background: linear-gradient(90deg, #e5e7eb 25%, #f5f5f5 50%, #e5e7eb 75%);
+  background-size: 200% 100%;
+  animation: shimmer-preview 1.5s infinite;
+}
+
+@keyframes shimmer-preview {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.placeholder-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.placeholder-option.active .placeholder-label {
+  color: var(--color-primary);
+}
+
+.mode-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mode-option {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+}
+
+.mode-option:hover {
+  border-color: var(--color-primary);
+}
+
+.mode-option.active {
+  border-color: var(--color-primary);
+  background: rgba(59, 130, 246, 0.05);
+}
+
+.mode-icon {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+
+.mode-option.active .mode-icon {
+  color: var(--color-primary);
+}
+
+.mode-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mode-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.mode-desc {
+  font-size: 12px;
+  color: var(--color-text-muted);
 }
 
 @media (max-width: 640px) {

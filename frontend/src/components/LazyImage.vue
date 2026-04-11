@@ -1,19 +1,23 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { placeholderSrc, isShimmerStyle } from '../utils/placeholder'
 
 const props = defineProps({
   src: { type: String, required: true },
   alt: { type: String, default: '' },
-  priority: { type: Number, default: 0 }, // 优先级，数字越小越优先
-  sequential: { type: Boolean, default: false }, // 是否需要顺序加载
-  placeholder: { type: String, default: '' }, // 占位图
+  priority: { type: Number, default: 0 },
+  sequential: { type: Boolean, default: false },
+  placeholder: { type: String, default: '' },
+  shouldLoad: { default: null }, // null = IntersectionObserver 控制；true/false = 外部控制
 })
+
+const emit = defineEmits(['loaded', 'error'])
 
 const imgRef = ref(null)
 const isLoaded = ref(false)
 const isLoading = ref(false)
 const hasError = ref(false)
-const currentSrc = ref(props.placeholder || '')
+const currentSrc = ref(props.placeholder || placeholderSrc.value)
 
 let observer = null
 
@@ -31,18 +35,25 @@ async function loadImage() {
       currentSrc.value = props.src
       isLoaded.value = true
       isLoading.value = false
+      emit('loaded')
       resolve()
     }
 
     img.onerror = () => {
       hasError.value = true
       isLoading.value = false
+      emit('error')
       reject(new Error('Image load failed'))
     }
 
     img.src = props.src
   })
 }
+
+// 外部控制加载：shouldLoad 变为 true 时触发
+watch(() => props.shouldLoad, (val) => {
+  if (val === true) loadImage()
+}, { immediate: true })
 
 // 设置 Intersection Observer
 function setupObserver() {
@@ -96,7 +107,9 @@ defineExpose({
 })
 
 onMounted(() => {
-  // 在 sequential 模式下，不使用 observer，完全由父组件控制加载
+  // shouldLoad 由外部控制时，不使用 observer
+  if (props.shouldLoad !== null) return
+  // sequential 模式完全由父组件控制
   if (!props.sequential) {
     setupObserver()
   }
@@ -112,8 +125,8 @@ onUnmounted(() => {
 watch(() => props.src, () => {
   if (isLoaded.value) {
     isLoaded.value = false
-    currentSrc.value = props.placeholder || ''
-    // 在 sequential 模式下，不使用 observer
+    currentSrc.value = props.placeholder || placeholderSrc.value
+    if (props.shouldLoad !== null) return
     if (!props.sequential) {
       setupObserver()
     }
@@ -145,10 +158,11 @@ watch(() => props.src, () => {
       <span>加载失败，点击重试</span>
     </div>
 
-    <!-- 占位符 -->
-    <div v-if="!isLoaded && !isLoading && !hasError" class="lazy-placeholder">
+    <!-- shimmer 占位（仅 shimmer 风格时显示） -->
+    <div v-if="isShimmerStyle && !isLoaded && !hasError" class="lazy-placeholder">
       <div class="lazy-placeholder-shimmer"></div>
     </div>
+
   </div>
 </template>
 
@@ -235,7 +249,8 @@ watch(() => props.src, () => {
 }
 
 @keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
 }
+
 </style>

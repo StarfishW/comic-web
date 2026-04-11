@@ -34,6 +34,16 @@ const routes = [
     component: () => import('../views/FavoritesView.vue'),
   },
   {
+    path: '/history',
+    name: 'History',
+    component: () => import('../views/HistoryView.vue'),
+  },
+  {
+    path: '/cache',
+    name: 'Cache',
+    component: () => import('../views/CacheView.vue'),
+  },
+  {
     path: '/login',
     name: 'Login',
     component: () => import('../views/LoginView.vue'),

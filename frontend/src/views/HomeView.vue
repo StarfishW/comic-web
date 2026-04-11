@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { getComics } from '../api'
 import ComicCard from '../components/ComicCard.vue'
 import SkeletonGrid from '../components/SkeletonGrid.vue'
@@ -11,6 +11,15 @@ const page = ref(1)
 const hasMore = ref(true)
 const loadingMore = ref(false)
 const orderBy = ref('mr')
+
+// 顺序加载：每完成一张图释放下一张，始终保持 CONCURRENCY 个并发
+const CONCURRENCY = 4
+const loadedCount = ref(0)
+const loadableCount = computed(() => loadedCount.value + CONCURRENCY)
+
+function onImageReady() {
+  loadedCount.value++
+}
 
 const orderOptions = [
   { value: 'mr', label: '最新' },
@@ -24,6 +33,7 @@ async function fetchData() {
     loading.value = true
     error.value = null
     page.value = 1
+    loadedCount.value = 0
     const data = await getComics({ page: 1, order_by: orderBy.value })
     comics.value = data.items || []
     hasMore.value = comics.value.length > 0 && page.value < (data.page_count || 1)
@@ -41,6 +51,7 @@ async function loadMore() {
     page.value++
     const data = await getComics({ page: page.value, order_by: orderBy.value })
     const items = data.items || []
+    const prevLength = comics.value.length
     comics.value.push(...items)
     hasMore.value = items.length > 0 && page.value < (data.page_count || 1)
   } catch {
@@ -83,7 +94,13 @@ onMounted(fetchData)
       </div>
 
       <div v-else class="comic-grid">
-        <ComicCard v-for="c in comics" :key="c.id" :comic="c" />
+        <ComicCard
+          v-for="(c, index) in comics"
+          :key="c.id"
+          :comic="c"
+          :shouldLoad="index < loadableCount"
+          @imageReady="onImageReady"
+        />
       </div>
 
       <div v-if="!loading && hasMore" class="load-more">

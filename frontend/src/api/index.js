@@ -64,4 +64,37 @@ export const pingDomains = () =>
 export const switchDomain = (domain) =>
   http.post('/domains/switch', { domain })
 
+// ---- Chapter Cache ----
+export const startChapterCache = (albumId, photoId, meta = {}) =>
+  http.post(`/chapters/${albumId}/${photoId}/cache`, meta)
+
+export const getChapterCacheStatus = (albumId, photoId) =>
+  http.get(`/chapters/${albumId}/${photoId}/cache/status`)
+
+export const getCachedImageUrl = (albumId, photoId, index) =>
+  `/api/chapters/${albumId}/${photoId}/cached/${index}`
+
+export const getAlbumCacheStatus = (albumId) =>
+  http.get(`/comics/${albumId}/cache/status`)
+
+// ---- Cache Library ----
+export const getCacheLibrary = () =>
+  http.get('/cache/library')
+
+export const deleteChapterCache = (albumId, photoId) =>
+  http.delete(`/cache/${albumId}/${photoId}`)
+
+export const deleteAlbumCache = (albumId) =>
+  http.delete(`/cache/${albumId}`)
+
+// ---- Chapter PDF ----
+export const startChapterPdf = (albumId, photoId) =>
+  http.post(`/chapters/${albumId}/${photoId}/pdf`)
+
+export const getChapterPdfStatus = (albumId, photoId) =>
+  http.get(`/chapters/${albumId}/${photoId}/pdf/status`)
+
+export const getChapterPdfDownloadUrl = (albumId, photoId) =>
+  `/api/chapters/${albumId}/${photoId}/pdf/download`
+
 export default http

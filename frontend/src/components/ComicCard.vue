@@ -4,7 +4,9 @@ import LazyImage from './LazyImage.vue'
 
 const props = defineProps({
   comic: { type: Object, required: true },
+  shouldLoad: { default: null },
 })
+const emit = defineEmits(['imageReady'])
 </script>
 
 <template>
@@ -14,6 +16,9 @@ const props = defineProps({
         :src="getCoverUrl(comic.id)"
         :alt="comic.title"
         class="cover"
+        :shouldLoad="shouldLoad"
+        @loaded="emit('imageReady')"
+        @error="emit('imageReady')"
       />
     </div>
     <div class="info">
