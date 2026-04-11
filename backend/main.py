@@ -11,6 +11,7 @@ from typing import Optional, List
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import json
 import shutil
 import zipfile
 import math
@@ -549,8 +550,6 @@ def get_cache_library():
     if not CACHE_DIR.exists():
         return {"albums": {}, "total_size_bytes": 0}
 
-    import json as _json
-
     for album_dir in sorted(CACHE_DIR.iterdir()):
         if not album_dir.is_dir():
             continue
@@ -564,7 +563,7 @@ def get_cache_library():
         album_author = ""
         if album_meta_file.exists():
             try:
-                _data = _json.loads(album_meta_file.read_text(encoding='utf-8'))
+                _data = json.loads(album_meta_file.read_text(encoding='utf-8'))
                 album_title = _data.get('title', '')
                 album_author = _data.get('author', '')
             except Exception:
@@ -580,7 +579,7 @@ def get_cache_library():
             chapter_title = ""
             if chapter_meta_file.exists():
                 try:
-                    chapter_title = _json.loads(chapter_meta_file.read_text(encoding='utf-8')).get('title', '')
+                    chapter_title = json.loads(chapter_meta_file.read_text(encoding='utf-8')).get('title', '')
                 except Exception:
                     pass
 
@@ -642,9 +641,9 @@ def delete_album_cache(album_id: str):
     if not album_dir.exists():
         raise HTTPException(404, "专辑缓存不存在")
     try:
-        # 清理内存状态
-        for photo_id in list(_cache_status.keys()):
-            if (CACHE_DIR / album_id / photo_id).parent == album_dir:
+        # 清理内存状态：仅清理属于该专辑的条目
+        for photo_id, info in list(_cache_status.items()):
+            if info.get('album_id') == album_id:
                 _cache_status.pop(photo_id, None)
                 _pdf_status.pop(photo_id, None)
         shutil.rmtree(str(album_dir))
@@ -688,7 +687,6 @@ class CacheMetaBody(BaseModel):
 
 @app.post("/api/chapters/{album_id}/{photo_id}/cache")
 def start_chapter_cache(album_id: str, photo_id: str, background_tasks: BackgroundTasks, meta: CacheMetaBody = None):
-    import json as _json
     cache_dir = get_chapter_cache_dir(album_id, photo_id)
     current = _cache_status.get(photo_id, {})
 
@@ -705,18 +703,18 @@ def start_chapter_cache(album_id: str, photo_id: str, background_tasks: Backgrou
         if meta.album_title:
             album_meta = album_dir / 'meta.json'
             try:
-                existing = _json.loads(album_meta.read_text(encoding='utf-8')) if album_meta.exists() else {}
+                existing = json.loads(album_meta.read_text(encoding='utf-8')) if album_meta.exists() else {}
             except Exception:
                 existing = {}
             existing['title'] = meta.album_title
             if meta.author:
                 existing['author'] = meta.author
-            album_meta.write_text(_json.dumps(existing, ensure_ascii=False), encoding='utf-8')
+            album_meta.write_text(json.dumps(existing, ensure_ascii=False), encoding='utf-8')
 
         if meta.chapter_title:
             cache_dir.mkdir(parents=True, exist_ok=True)
             (cache_dir / 'meta.json').write_text(
-                _json.dumps({'title': meta.chapter_title}, ensure_ascii=False),
+                json.dumps({'title': meta.chapter_title}, ensure_ascii=False),
                 encoding='utf-8'
             )
 
@@ -778,8 +776,7 @@ def get_album_cache_status(album_id: str):
 
     # 用内存状态覆盖（内存更实时，能反映正在下载的进度）
     for photo_id, mem in _cache_status.items():
-        chapter_dir = CACHE_DIR / album_id / photo_id
-        if str(chapter_dir.parent) == str(album_dir):
+        if mem.get('album_id') == album_id:
             result[photo_id] = {
                 'status': mem.get('status', 'pending'),
                 'progress': mem.get('progress', 0),
