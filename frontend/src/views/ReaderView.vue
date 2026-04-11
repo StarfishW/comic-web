@@ -21,6 +21,8 @@ const error = ref(null);
 const mode = ref("scroll"); // 'scroll' | 'page'
 const currentPage = ref(0);
 const showToolbar = ref(true);
+const showEpisodeList = ref(false);
+const episodeListRef = ref(null);
 const imageLoader = new ImageLoader({
   maxConcurrent: LOADING_CONFIG.maxConcurrent,
   sequential: true,
@@ -28,6 +30,9 @@ const imageLoader = new ImageLoader({
 const lazyImageRefs = ref([]);
 const scrollContainerRef = ref(null);
 const scrollPageRefs = ref([]);
+let chapterRequestId = 0;
+let sequentialStartTimer = null;
+let scrollFrame = null;
 let loadingCancelled = false; // 用于取消加载
 
 // 缩放
@@ -53,11 +58,31 @@ const pdfPhase = ref('')
 let pdfPoller = null
 let pdfDownloadTriggered = false
 
-function startCachePolling(albumId, photoId) {
+function clearAsyncState() {
+  if (cachePoller) {
+    clearInterval(cachePoller)
+    cachePoller = null
+  }
+  if (pdfPoller) {
+    clearInterval(pdfPoller)
+    pdfPoller = null
+  }
+  if (sequentialStartTimer) {
+    clearTimeout(sequentialStartTimer)
+    sequentialStartTimer = null
+  }
+  if (scrollFrame) {
+    cancelAnimationFrame(scrollFrame)
+    scrollFrame = null
+  }
+}
+
+function startCachePolling(albumId, photoId, requestId) {
   if (cachePoller) clearInterval(cachePoller)
   cachePoller = setInterval(async () => {
     try {
       const data = await getChapterCacheStatus(albumId, photoId)
+      if (requestId !== chapterRequestId) return
       cacheStatus.value = data.status
       cacheProgress.value = data.progress || 0
       if (data.status === 'ready' || data.status === 'error') {
@@ -71,11 +96,12 @@ function startCachePolling(albumId, photoId) {
   }, 1000)
 }
 
-function startPdfPolling(albumId, photoId) {
+function startPdfPolling(albumId, photoId, requestId) {
   if (pdfPoller) clearInterval(pdfPoller)
   pdfPoller = setInterval(async () => {
     try {
       const data = await getChapterPdfStatus(albumId, photoId)
+      if (requestId !== chapterRequestId) return
       pdfStatus.value = data.status
       pdfProgress.value = data.progress || 0
       pdfPhase.value = data.phase || ''
@@ -212,7 +238,7 @@ function onScrollTouchEnd(e) {
 }
 
 // 滚动模式下追踪当前页
-function handleScroll() {
+function updateCurrentPageFromScroll() {
   if (!scrollContainerRef.value) return;
   const container = scrollContainerRef.value;
   const midPoint = container.scrollTop + container.clientHeight / 2;
@@ -228,6 +254,14 @@ function handleScroll() {
     }
   });
   currentPage.value = closest;
+}
+
+function handleScroll() {
+  if (scrollFrame) return;
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = null;
+    updateCurrentPageFromScroll();
+  });
 }
 
 const totalPages = computed(() => chapter.value?.images?.length || 0);
@@ -264,6 +298,7 @@ function getImageSrc(index) {
 }
 
 async function fetchChapter() {
+  const requestId = ++chapterRequestId;
   try {
     loading.value = true;
     error.value = null;
@@ -274,26 +309,32 @@ async function fetchChapter() {
     scrollPageRefs.value = []; // 清空旧的 DOM 引用
     cacheStatus.value = null
     cacheProgress.value = 0
-    if (cachePoller) { clearInterval(cachePoller); cachePoller = null }
     pdfStatus.value = null
     pdfProgress.value = 0
     pdfPhase.value = ''
     pdfDownloadTriggered = false
-    if (pdfPoller) { clearInterval(pdfPoller); pdfPoller = null }
+    episodeList.value = []
+    clearAsyncState()
 
     chapter.value = await getChapterDetail(props.photoId);
+    if (requestId !== chapterRequestId) return;
 
     // 后台拉取本漫画章节列表（不 await，不影响加载速度）
     if (chapter.value.album_id) {
       episodeList.value = [] // 重置，防止上一章节残留
       getComicDetail(chapter.value.album_id)
-        .then(data => { episodeList.value = data.episodes || [] })
+        .then(data => {
+          if (requestId === chapterRequestId) {
+            episodeList.value = data.episodes || []
+          }
+        })
         .catch(() => {})
     }
 
     // 缓存模式处理
     if (viewMode.value === 'cache') {
       const statusData = await getChapterCacheStatus(albumId.value, props.photoId)
+      if (requestId !== chapterRequestId) return;
       if (statusData.status === 'ready') {
         cacheStatus.value = 'ready'
         cacheProgress.value = 100
@@ -301,10 +342,12 @@ async function fetchChapter() {
         cacheStatus.value = statusData.status === 'not_started' ? 'pending' : statusData.status
         cacheProgress.value = statusData.progress || 0
         await startChapterCache(albumId.value, props.photoId)
-        startCachePolling(albumId.value, props.photoId)
+        if (requestId !== chapterRequestId) return;
+        startCachePolling(albumId.value, props.photoId, requestId)
       }
     } else if (viewMode.value === 'pdf') {
       const statusData = await getChapterPdfStatus(albumId.value, props.photoId)
+      if (requestId !== chapterRequestId) return;
       if (statusData.status === 'ready') {
         pdfStatus.value = 'ready'
         pdfProgress.value = 100
@@ -315,7 +358,8 @@ async function fetchChapter() {
       } else {
         pdfStatus.value = 'caching'
         await startChapterPdf(albumId.value, props.photoId)
-        startPdfPolling(albumId.value, props.photoId)
+        if (requestId !== chapterRequestId) return;
+        startPdfPolling(albumId.value, props.photoId, requestId)
       }
     } else {
       cacheStatus.value = 'ready'
@@ -325,6 +369,7 @@ async function fetchChapter() {
 
     // 等待 DOM 更新后开始顺序加载
     await nextTick();
+    if (requestId !== chapterRequestId) return;
 
     // 再次等待，确保所有 refs 都已设置
     await nextTick();
@@ -332,14 +377,20 @@ async function fetchChapter() {
     // 在滚动模式下启动顺序加载
     if (mode.value === "scroll") {
       // 添加一个小延迟，确保 refs 完全就绪
-      setTimeout(() => {
-        startSequentialLoading();
+      sequentialStartTimer = setTimeout(() => {
+        sequentialStartTimer = null;
+        if (requestId === chapterRequestId) {
+          startSequentialLoading();
+        }
       }, 100);
     }
   } catch (e) {
+    if (requestId !== chapterRequestId) return;
     error.value = "加载失败: " + (e.response?.data?.detail || e.message);
   } finally {
-    loading.value = false;
+    if (requestId === chapterRequestId) {
+      loading.value = false;
+    }
   }
 }
 
@@ -430,8 +481,20 @@ function goBack() {
   }
 }
 
-function toggleToolbar() {
+function handleReaderClick() {
+  if (showEpisodeList.value) {
+    showEpisodeList.value = false;
+    return;
+  }
   showToolbar.value = !showToolbar.value;
+}
+
+async function toggleEpisodeList() {
+  showEpisodeList.value = !showEpisodeList.value;
+  if (showEpisodeList.value) {
+    await nextTick();
+    episodeListRef.value?.querySelector('.ep-item.active')?.scrollIntoView({ block: 'center' });
+  }
 }
 
 function handleKeydown(e) {
@@ -475,16 +538,16 @@ onMounted(() => {
   document.addEventListener("keydown", handleKeydown);
 });
 onUnmounted(() => {
+  chapterRequestId += 1;
   document.removeEventListener("keydown", handleKeydown);
   cancelSequentialLoading();
+  clearAsyncState();
   imageLoader.clear();
-  if (cachePoller) clearInterval(cachePoller)
-  if (pdfPoller) clearInterval(pdfPoller)
 });
 </script>
 
 <template>
-  <div class="reader-view" @click="toggleToolbar">
+  <div class="reader-view" @click="handleReaderClick">
     <!-- Top Toolbar -->
     <transition name="slide-down">
       <div v-if="showToolbar" class="toolbar top-bar" @click.stop>
@@ -513,6 +576,56 @@ onUnmounted(() => {
             @click="mode = 'page'"
           >
             翻页
+          </button>
+        </div>
+        <button
+          :class="['tool-btn', 'toc-btn', { active: showEpisodeList }]"
+          @click.stop="toggleEpisodeList"
+          :title="showEpisodeList ? '关闭目录' : '目录'"
+          aria-label="目录"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="12" x2="15" y2="12"/>
+            <line x1="3" y1="18" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+    </transition>
+
+    <!-- Drawer Mask -->
+    <transition name="mask-fade">
+      <div v-if="showEpisodeList" class="drawer-mask" @click="showEpisodeList = false"></div>
+    </transition>
+
+    <!-- Episode List Drawer -->
+    <transition name="drawer">
+      <div v-if="showEpisodeList" class="episode-drawer" @click.stop>
+        <div class="drawer-header">
+          <span class="drawer-title">目录</span>
+          <span class="drawer-count" v-if="episodeList.length">{{ episodeList.length }} 话</span>
+          <button class="drawer-close" @click="showEpisodeList = false" aria-label="关闭">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="drawer-list" ref="episodeListRef">
+          <div v-if="!episodeList.length" class="drawer-empty">
+            <div class="drawer-spinner"></div>
+            目录加载中…
+          </div>
+          <button
+            v-for="ep in episodeList"
+            :key="ep.id"
+            :class="['ep-item', { active: ep.id === photoId }]"
+            @click="goToEpisode(ep); showEpisodeList = false"
+          >
+            <span class="ep-item-indicator" v-if="ep.id === photoId"></span>
+            <span class="ep-item-title">{{ epTitle(ep) }}</span>
+            <svg v-if="ep.id === photoId" class="ep-item-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
           </button>
         </div>
       </div>
@@ -1152,5 +1265,188 @@ onUnmounted(() => {
   background: var(--color-primary);
   border-color: var(--color-primary);
   color: #fff;
+}
+
+/* TOC 按钮 */
+.toc-btn {
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.7);
+  transition: background 0.15s, color 0.15s;
+}
+.toc-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.toc-btn.active {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+/* 遮罩 */
+.drawer-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+/* 抽屉 */
+.episode-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 16;
+  width: min(320px, 85vw);
+  display: flex;
+  flex-direction: column;
+  background: rgba(18, 18, 18, 0.97);
+  backdrop-filter: blur(12px);
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.drawer-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.drawer-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.02em;
+}
+
+.drawer-count {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.35);
+  font-variant-numeric: tabular-nums;
+}
+
+.drawer-close {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.5);
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+.drawer-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.drawer-list {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px 0;
+}
+.drawer-list::-webkit-scrollbar {
+  width: 3px;
+}
+.drawer-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.drawer-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+}
+
+.drawer-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 48px 16px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.drawer-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+.ep-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 16px 10px 20px;
+  text-align: left;
+  font-size: 13.5px;
+  color: rgba(255, 255, 255, 0.6);
+  transition: background 0.12s, color 0.12s;
+  line-height: 1.4;
+}
+.ep-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.9);
+}
+.ep-item.active {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.ep-item-indicator {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 60%;
+  min-height: 18px;
+  background: var(--color-primary);
+  border-radius: 0 2px 2px 0;
+}
+
+.ep-item-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ep-item.active .ep-item-title {
+  font-weight: 500;
+}
+
+.ep-item-check {
+  flex-shrink: 0;
+  color: var(--color-primary);
+  opacity: 0.9;
+}
+
+/* 抽屉动画 */
+.drawer-enter-active,
+.drawer-leave-active {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.drawer-enter-from,
+.drawer-leave-to {
+  transform: translateX(100%);
+}
+
+.mask-fade-enter-active,
+.mask-fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+.mask-fade-enter-from,
+.mask-fade-leave-to {
+  opacity: 0;
 }
 </style>
