@@ -45,6 +45,21 @@ def get_chapter_cache_dir(album_id: str, photo_id: str) -> Path:
 # 缓存下载状态跟踪 {photo_id: {status, progress, total, error}}
 _cache_status: dict = {}
 _pdf_status: dict = {}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
+
+
+def normalize_image_suffix(suffix: str) -> str:
+    suffix = suffix.lower().lstrip('.')
+    return suffix if f'.{suffix}' in IMAGE_EXTENSIONS else 'jpg'
+
+
+def has_cached_images(cache_dir: Path) -> bool:
+    if not cache_dir.exists():
+        return False
+    return any(
+        item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS
+        for item in cache_dir.iterdir()
+    )
 
 
 def get_client():
@@ -159,14 +174,14 @@ def _download_chapter_background(album_id: str, photo_id: str):
             resp = cl.get_jm_image(img_url)
             resp.require_success()
 
-            suffix = image_detail.img_file_suffix.lower().lstrip('.') or 'jpg'
-            out_path = cache_dir / f"{i:04d}.jpg"
+            suffix = normalize_image_suffix(image_detail.img_file_suffix or '')
 
             if scramble_id and not cl.img_is_not_need_to_decode(img_url, resp):
                 from PIL import Image as PILImage
                 num = JmImageTool.get_num_by_url(scramble_id, img_url)
                 img_src = JmImageTool.open_image(resp.content)
                 if num > 0:
+                    out_path = cache_dir / f"{i:04d}.jpg"
                     w, h = img_src.size
                     img_decode = PILImage.new("RGB", (w, h))
                     over = h % num
@@ -184,11 +199,11 @@ def _download_chapter_background(album_id: str, photo_id: str):
                         )
                     img_decode.save(str(out_path), format="JPEG", quality=92)
                 else:
+                    out_path = cache_dir / f"{i:04d}.{suffix}"
                     out_path.write_bytes(resp.content)
             else:
                 # GIF 或无需解码
-                ext = suffix if suffix in ('gif', 'png', 'webp') else 'jpg'
-                out_path = cache_dir / f"{i:04d}.{ext}"
+                out_path = cache_dir / f"{i:04d}.{suffix}"
                 out_path.write_bytes(resp.content)
 
             _cache_status[photo_id]['progress'] = round((i + 1) / total * 100)
@@ -584,9 +599,8 @@ def get_cache_library():
                     pass
 
             # 统计图片数和大小
-            image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
             image_files = [f for f in chapter_dir.iterdir()
-                           if f.is_file() and f.suffix.lower() in image_exts]
+                           if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS]
             pdf_file = chapter_dir / f"{photo_id}.pdf"
             has_pdf = pdf_file.exists()
 
@@ -642,10 +656,17 @@ def delete_album_cache(album_id: str):
         raise HTTPException(404, "专辑缓存不存在")
     try:
         # 清理内存状态：仅清理属于该专辑的条目
+        photo_ids = {
+            chapter_dir.name
+            for chapter_dir in album_dir.iterdir()
+            if chapter_dir.is_dir()
+        }
         for photo_id, info in list(_cache_status.items()):
             if info.get('album_id') == album_id:
-                _cache_status.pop(photo_id, None)
-                _pdf_status.pop(photo_id, None)
+                photo_ids.add(photo_id)
+        for photo_id in photo_ids:
+            _cache_status.pop(photo_id, None)
+            _pdf_status.pop(photo_id, None)
         shutil.rmtree(str(album_dir))
         return {"ok": True}
     except Exception as e:
@@ -693,7 +714,7 @@ def start_chapter_cache(album_id: str, photo_id: str, background_tasks: Backgrou
     if current.get('status') == 'downloading':
         return {"status": "downloading", "progress": current.get('progress', 0)}
 
-    if current.get('status') == 'ready' and cache_dir.exists():
+    if current.get('status') == 'ready' and has_cached_images(cache_dir):
         return {"status": "ready", "progress": 100}
 
     # 持久化元数据到磁盘
@@ -729,8 +750,8 @@ def get_chapter_cache_status(album_id: str, photo_id: str):
     if current:
         return {"status": current['status'], "progress": current.get('progress', 0)}
     cache_dir = get_chapter_cache_dir(album_id, photo_id)
-    if cache_dir.exists() and any(cache_dir.iterdir()):
-        _cache_status[photo_id] = {'status': 'ready', 'progress': 100}
+    if has_cached_images(cache_dir):
+        _cache_status[photo_id] = {'status': 'ready', 'progress': 100, 'album_id': album_id}
         return {"status": "ready", "progress": 100}
     return {"status": "not_started", "progress": 0}
 
@@ -767,11 +788,7 @@ def get_album_cache_status(album_id: str):
             if not chapter_dir.is_dir():
                 continue
             photo_id = chapter_dir.name
-            has_images = any(
-                f.suffix.lower() in ('.jpg', '.jpeg', '.png', '.gif', '.webp')
-                for f in chapter_dir.iterdir()
-            )
-            if has_images:
+            if has_cached_images(chapter_dir):
                 result[photo_id] = {'status': 'ready', 'progress': 100}
 
     # 用内存状态覆盖（内存更实时，能反映正在下载的进度）
