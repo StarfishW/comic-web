@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { getCoverUrl, getComicDetail, addFavorite, startChapterCache, getChapterCacheStatus, getAlbumCacheStatus } from '../api'
 import { addHistory } from '../utils/history'
 import { registerMeta, startPolling as startGlobalPolling } from '../utils/cacheQueue'
@@ -16,7 +16,19 @@ const favoriteLoading = ref(false)
 const cacheMode = ref(false)           // 是否处于缓存选择模式
 const selectedIds = ref(new Set())     // 选中的 episode id 集合
 const cacheStatusMap = ref({})         // { [photoId]: { status, progress } }
+const cacheAllLoading = ref(false)
 let cachePoller = null
+
+const cacheAllStats = computed(() => {
+  const episodes = comic.value?.episodes || []
+  const total = episodes.length
+  const readyCount = episodes.filter(ep => cacheStatusMap.value[ep.id]?.status === 'ready').length
+  const pendingCache = episodes.filter(ep => {
+    const s = cacheStatusMap.value[ep.id]?.status
+    return !s || s === 'not_started' || s === 'error'
+  })
+  return { total, readyCount, pendingCache }
+})
 
 async function fetchComic() {
   try {
@@ -156,6 +168,46 @@ function startPolling(albumId) {
   }, 2000)
 }
 
+async function cacheAll() {
+  if (cacheAllLoading.value) return
+  const { pendingCache } = cacheAllStats.value
+  if (!pendingCache.length) return
+
+  cacheAllLoading.value = true
+  const albumId = props.id
+  const albumTitle = comic.value?.title || props.id
+
+  pendingCache.forEach(ep => {
+    registerMeta(ep.id, {
+      albumId,
+      albumTitle,
+      chapterTitle: ep.title || `第${ep.sort}话`,
+    })
+  })
+
+  const map = { ...cacheStatusMap.value }
+  pendingCache.forEach(ep => { map[ep.id] = { status: 'pending', progress: 0 } })
+  cacheStatusMap.value = map
+
+  const ids = pendingCache.map(ep => ep.id)
+  const chunks = []
+  for (let i = 0; i < ids.length; i += 3) chunks.push(ids.slice(i, i + 3))
+  for (const chunk of chunks) {
+    await Promise.allSettled(chunk.map(id => {
+      const ep = comic.value?.episodes?.find(e => e.id === id)
+      return startChapterCache(albumId, id, {
+        album_title: comic.value?.title || '',
+        author: comic.value?.author || '',
+        chapter_title: ep ? (ep.title || `第${ep.sort}话`) : '',
+      })
+    }))
+  }
+
+  cacheAllLoading.value = false
+  startPolling(albumId)
+  startGlobalPolling()
+}
+
 onUnmounted(() => { if (cachePoller) clearInterval(cachePoller) })
 
 watch(() => props.id, fetchComic)
@@ -243,7 +295,18 @@ onMounted(fetchComic)
                 >缓存 ({{ selectedIds.size }})</button>
                 <button class="act-btn" @click="toggleCacheMode">取消</button>
               </template>
-              <button v-else class="act-btn" @click="toggleCacheMode">管理缓存</button>
+              <template v-else>
+                <span v-if="cacheAllStats.readyCount > 0" class="cache-summary">
+                  已缓存 {{ cacheAllStats.readyCount }}/{{ cacheAllStats.total }}
+                </span>
+                <button
+                  v-if="cacheAllStats.pendingCache.length > 0"
+                  class="act-btn act-btn-primary"
+                  :disabled="cacheAllLoading"
+                  @click="cacheAll"
+                >{{ cacheAllLoading ? '队列中...' : `一键缓存 (${cacheAllStats.pendingCache.length})` }}</button>
+                <button class="act-btn" @click="toggleCacheMode">管理缓存</button>
+              </template>
             </div>
           </div>
 
@@ -669,6 +732,12 @@ onMounted(fetchComic)
 .status-ready { color: #16a34a; }
 .status-error { color: #dc2626; }
 .status-loading { color: #d97706; font-size: 10px; }
+
+.cache-summary {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  padding: 5px 0;
+}
 
 @media (max-width: 640px) {
   .detail-header {

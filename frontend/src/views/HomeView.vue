@@ -1,18 +1,27 @@
 <script setup>
+defineOptions({ name: 'HomeView' })
 import { ref, computed, onMounted } from 'vue'
 import { getComics } from '../api'
 import ComicCard from '../components/ComicCard.vue'
 import SkeletonGrid from '../components/SkeletonGrid.vue'
+import { usePagedList } from '../composables/usePagedList'
 
-const comics = ref([])
-const loading = ref(true)
-const error = ref(null)
-const page = ref(1)
-const hasMore = ref(true)
-const loadingMore = ref(false)
 const orderBy = ref('mr')
 
-// 顺序加载：每完成一张图释放下一张，始终保持 CONCURRENCY 个并发
+const {
+  items: comics,
+  loading,
+  error,
+  hasMore,
+  loadingMore,
+  refresh,
+  loadMore,
+} = usePagedList({
+  fetchPage: ({ page }) => getComics({ page, order_by: orderBy.value }),
+  getErrorMessage: () => '加载失败，请检查后端是否启动',
+})
+
+// Keep only a small number of cover requests active at once.
 const CONCURRENCY = 4
 const loadedCount = ref(0)
 const loadableCount = computed(() => loadedCount.value + CONCURRENCY)
@@ -29,36 +38,8 @@ const orderOptions = [
 ]
 
 async function fetchData() {
-  try {
-    loading.value = true
-    error.value = null
-    page.value = 1
-    loadedCount.value = 0
-    const data = await getComics({ page: 1, order_by: orderBy.value })
-    comics.value = data.items || []
-    hasMore.value = comics.value.length > 0 && page.value < (data.page_count || 1)
-  } catch (e) {
-    error.value = '加载失败，请检查后端是否启动'
-  } finally {
-    loading.value = false
-  }
-}
-
-async function loadMore() {
-  if (loadingMore.value || !hasMore.value) return
-  try {
-    loadingMore.value = true
-    page.value++
-    const data = await getComics({ page: page.value, order_by: orderBy.value })
-    const items = data.items || []
-    const prevLength = comics.value.length
-    comics.value.push(...items)
-    hasMore.value = items.length > 0 && page.value < (data.page_count || 1)
-  } catch {
-    page.value--
-  } finally {
-    loadingMore.value = false
-  }
+  loadedCount.value = 0
+  await refresh()
 }
 
 function changeOrder(val) {
@@ -104,7 +85,7 @@ onMounted(fetchData)
       </div>
 
       <div v-if="!loading && hasMore" class="load-more">
-        <button class="load-more-btn" :disabled="loadingMore" @click="loadMore">
+        <button class="load-more-btn" :disabled="loadingMore" @click="loadMore()">
           <span v-if="loadingMore" class="spinner"></span>
           {{ loadingMore ? '加载中...' : '加载更多' }}
         </button>
@@ -225,7 +206,11 @@ onMounted(fetchData)
   animation: spin 0.6s linear infinite;
 }
 
-@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 
 @media (max-width: 640px) {
   .comic-grid {
@@ -233,6 +218,8 @@ onMounted(fetchData)
     gap: 10px;
   }
 
-  .section-title { font-size: 18px; }
+  .section-title {
+    font-size: 18px;
+  }
 }
 </style>

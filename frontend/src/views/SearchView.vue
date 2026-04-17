@@ -1,19 +1,22 @@
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+defineOptions({ name: 'SearchView' })
+import { ref, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { searchComics } from '../api'
 import ComicCard from '../components/ComicCard.vue'
 import SkeletonGrid from '../components/SkeletonGrid.vue'
+import { usePagedList } from '../composables/usePagedList'
 
 const route = useRoute()
-const comics = ref([])
-const loading = ref(false)
 const keyword = ref('')
-const page = ref(1)
-const pageCount = ref(0)
-const total = ref(0)
-const hasMore = ref(false)
-const loadingMore = ref(false)
+
+const CONCURRENCY = 4
+const loadedCount = ref(0)
+const loadableCount = computed(() => loadedCount.value + CONCURRENCY)
+
+function onImageReady() {
+  loadedCount.value++
+}
 
 const mainTag = ref(0)
 const searchTypes = [
@@ -24,56 +27,55 @@ const searchTypes = [
   { value: 4, label: '角色' },
 ]
 
-async function doSearch(q, tag = null) {
-  if (!q) return
-  keyword.value = q
-  if (tag !== null) mainTag.value = tag
-  try {
-    loading.value = true
-    page.value = 1
-    const data = await searchComics(q, {
-      page: 1,
-      main_tag: mainTag.value,
-    })
-    comics.value = data.items || []
-    total.value = data.total || 0
-    pageCount.value = data.page_count || 0
-    hasMore.value = page.value < pageCount.value
-  } catch {
-    comics.value = []
-  } finally {
-    loading.value = false
-  }
-}
+const {
+  items: comics,
+  loading,
+  error,
+  total,
+  hasMore,
+  loadingMore,
+  refresh,
+  loadMore,
+  reset,
+} = usePagedList({
+  fetchPage: ({ page }) => searchComics(keyword.value, {
+    page,
+    main_tag: mainTag.value,
+  }),
+  getErrorMessage: () => '搜索失败，请稍后重试',
+  initialLoading: false,
+})
 
-async function loadMore() {
-  if (loadingMore.value || !hasMore.value) return
-  try {
-    loadingMore.value = true
-    page.value++
-    const data = await searchComics(keyword.value, {
-      page: page.value,
-      main_tag: mainTag.value,
-    })
-    comics.value.push(...(data.items || []))
-    hasMore.value = page.value < (data.page_count || 0)
-  } catch {
-    page.value--
-  } finally {
-    loadingMore.value = false
+async function doSearch(q, tag = null) {
+  if (!q) {
+    keyword.value = ''
+    loadedCount.value = 0
+    reset()
+    return
   }
+
+  keyword.value = q
+  if (tag !== null) {
+    mainTag.value = tag
+  }
+
+  loadedCount.value = 0
+  await refresh()
 }
 
 watch(
   () => route.query,
-  (q) => {
-    if (q.q) doSearch(q.q, q.main_tag !== undefined ? Number(q.main_tag) : null)
-  },
-)
+  (query) => {
+    if (query.q) {
+      doSearch(query.q, query.main_tag !== undefined ? Number(query.main_tag) : null)
+      return
+    }
 
-onMounted(() => {
-  if (route.query.q) doSearch(route.query.q, route.query.main_tag !== undefined ? Number(route.query.main_tag) : null)
-})
+    keyword.value = ''
+    reset()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -84,7 +86,6 @@ onMounted(() => {
         <span v-if="total" class="total-count">共 {{ total }} 条结果</span>
       </h1>
 
-      <!-- Search type tabs -->
       <div class="type-tabs" v-if="keyword">
         <button
           v-for="t in searchTypes"
@@ -96,6 +97,11 @@ onMounted(() => {
 
       <SkeletonGrid v-if="loading" :count="12" />
 
+      <div v-else-if="error" class="empty-state">
+        <p>{{ error }}</p>
+        <button class="load-more-btn" @click="doSearch(keyword, mainTag)">重试</button>
+      </div>
+
       <div v-else-if="keyword && !comics.length" class="empty-state">
         <p>没有找到 "{{ keyword }}" 的相关结果</p>
         <p class="empty-hint">试试其他关键词或切换搜索类型</p>
@@ -106,11 +112,17 @@ onMounted(() => {
       </div>
 
       <div v-else class="comic-grid">
-        <ComicCard v-for="c in comics" :key="c.id" :comic="c" />
+        <ComicCard
+          v-for="(c, index) in comics"
+          :key="c.id"
+          :comic="c"
+          :shouldLoad="index < loadableCount"
+          @imageReady="onImageReady"
+        />
       </div>
 
       <div v-if="!loading && hasMore" class="load-more">
-        <button class="load-more-btn" :disabled="loadingMore" @click="loadMore">
+        <button class="load-more-btn" :disabled="loadingMore" @click="loadMore()">
           {{ loadingMore ? '加载中...' : '加载更多' }}
         </button>
       </div>
@@ -119,7 +131,9 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.search-view { padding: 20px 0 40px; }
+.search-view {
+  padding: 20px 0 40px;
+}
 
 .container {
   max-width: 1280px;

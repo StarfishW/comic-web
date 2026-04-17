@@ -9,8 +9,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app/backend
-      - ./jmcomic:/app/jmcomic
+      - comic_cache:/app/backend/chapter_cache
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
@@ -33,3 +32,6 @@ services:
 networks:
   comic-network:
     driver: bridge
+
+volumes:
+  comic_cache:

@@ -1,50 +1,39 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+defineOptions({ name: 'FavoritesView' })
+import { ref, computed, onMounted } from 'vue'
 import { getFavorites } from '../api'
 import ComicCard from '../components/ComicCard.vue'
 import SkeletonGrid from '../components/SkeletonGrid.vue'
+import { usePagedList } from '../composables/usePagedList'
 
-const comics = ref([])
 const folders = ref([])
-const loading = ref(true)
-const error = ref(null)
-const page = ref(1)
-const hasMore = ref(false)
-const loadingMore = ref(false)
 const currentFolder = ref('0')
-const pageCount = ref(0)
 
-async function fetchFavorites() {
-  try {
-    loading.value = true
-    error.value = null
-    page.value = 1
-    const data = await getFavorites({ page: 1, folder_id: currentFolder.value })
-    comics.value = data.items || []
-    folders.value = data.folders || []
-    pageCount.value = data.page_count || 0
-    hasMore.value = page.value < pageCount.value
-  } catch (e) {
-    error.value = '请先登录后再查看收藏'
-    comics.value = []
-  } finally {
-    loading.value = false
-  }
+const CONCURRENCY = 4
+const loadedCount = ref(0)
+const loadableCount = computed(() => loadedCount.value + CONCURRENCY)
+
+function onImageReady() {
+  loadedCount.value++
 }
 
-async function loadMore() {
-  if (loadingMore.value || !hasMore.value) return
-  try {
-    loadingMore.value = true
-    page.value++
-    const data = await getFavorites({ page: page.value, folder_id: currentFolder.value })
-    comics.value.push(...(data.items || []))
-    hasMore.value = page.value < (data.page_count || 0)
-  } catch {
-    page.value--
-  } finally {
-    loadingMore.value = false
-  }
+const {
+  items: comics,
+  loading,
+  error,
+  hasMore,
+  loadingMore,
+  refresh,
+  loadMore,
+} = usePagedList({
+  fetchPage: ({ page }) => getFavorites({ page, folder_id: currentFolder.value }),
+  getErrorMessage: () => '请先登录后再查看收藏',
+})
+
+async function fetchFavorites() {
+  loadedCount.value = 0
+  const data = await refresh()
+  folders.value = data?.folders || []
 }
 
 function changeFolder(fid) {
@@ -60,7 +49,6 @@ onMounted(fetchFavorites)
     <div class="container">
       <h1 class="page-title">我的收藏</h1>
 
-      <!-- Folder tabs -->
       <div class="folder-tabs" v-if="folders.length">
         <button
           :class="['tab', { active: currentFolder === '0' }]"
@@ -87,11 +75,17 @@ onMounted(fetchFavorites)
       </div>
 
       <div v-else class="comic-grid">
-        <ComicCard v-for="c in comics" :key="c.id" :comic="c" />
+        <ComicCard
+          v-for="(c, index) in comics"
+          :key="c.id"
+          :comic="c"
+          :shouldLoad="index < loadableCount"
+          @imageReady="onImageReady"
+        />
       </div>
 
       <div v-if="!loading && hasMore" class="load-more">
-        <button class="load-more-btn" :disabled="loadingMore" @click="loadMore">
+        <button class="load-more-btn" :disabled="loadingMore" @click="loadMore()">
           {{ loadingMore ? '加载中...' : '加载更多' }}
         </button>
       </div>
@@ -100,7 +94,9 @@ onMounted(fetchFavorites)
 </template>
 
 <style scoped>
-.favorites-view { padding: 20px 0 40px; }
+.favorites-view {
+  padding: 20px 0 40px;
+}
 
 .container {
   max-width: 1280px;

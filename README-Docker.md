@@ -1,162 +1,129 @@
-# Comic Web - Docker 部署指南
-
-本项目支持使用 Docker 和 Docker Compose 进行一键部署。
+# Docker 部署指南
 
 ## 前置要求
 
 - Docker Engine 20.10+
 - Docker Compose 2.0+
+- 已克隆本仓库（含子模块）
 
 ## 快速开始
 
-### 1. 启动所有服务
-
-在项目根目录下运行：
-
 ```bash
-docker-compose up -d
+# 1. 初始化 jmcomic 子模块（首次克隆必须执行）
+git submodule update --init
+
+# 2. 构建镜像并后台启动
+docker compose up --build -d
 ```
 
-这将会：
-- 构建后端 API 服务（Python FastAPI）
-- 构建前端 Web 服务（Vue 3 + Nginx）
-- 启动两个服务并建立网络连接
+启动后访问：
 
-### 2. 访问应用
+| 服务 | 地址 |
+|------|------|
+| 前端页面 | http://localhost:90 |
+| 后端 API | http://localhost:8000 |
+| API 文档 | http://localhost:8000/docs |
 
-- **前端页面**: http://localhost
-- **后端 API**: http://localhost:8000
-- **API 文档**: http://localhost:8000/docs
+## 服务说明
 
-### 3. 查看日志
+### backend
+
+| 项目 | 内容 |
+|------|------|
+| 镜像基础 | python:3.11-slim |
+| 端口 | 8000 |
+| 框架 | FastAPI + uvicorn |
+| 缓存路径 | `/app/backend/chapter_cache`（命名卷 `comic_cache` 持久化） |
+
+### frontend
+
+| 项目 | 内容 |
+|------|------|
+| 构建基础 | node:22-alpine（多阶段构建） |
+| 运行基础 | nginx:alpine |
+| 端口 | 90（容器内 80） |
+| API 代理 | Nginx 将 `/api/*` 反代到 `backend:8000` |
+
+## 数据持久化
+
+漫画缓存存储在 Docker 命名卷 `comic_cache` 中，容器重启或 `docker compose down` 后数据不会丢失。
 
 ```bash
-# 查看所有服务日志
-docker-compose logs -f
+# 查看卷占用
+docker volume inspect comic_cache
 
-# 查看后端日志
-docker-compose logs -f backend
+# 停止服务但保留缓存
+docker compose down
 
-# 查看前端日志
-docker-compose logs -f frontend
+# 停止服务并清空缓存（谨慎）
+docker compose down -v
 ```
 
-### 4. 停止服务
+## 常用命令
 
 ```bash
+# 查看运行状态
+docker compose ps
+
+# 查看实时日志
+docker compose logs -f
+docker compose logs -f backend
+docker compose logs -f frontend
+
 # 停止服务
-docker-compose stop
+docker compose stop
 
-# 停止并删除容器
-docker-compose down
-
-# 停止并删除容器及卷
-docker-compose down -v
+# 重新构建（代码更新后）
+docker compose up --build -d
 ```
 
-## 服务配置
+## 自定义端口
 
-### 后端服务 (backend)
-
-- **端口**: 8000
-- **技术栈**: Python 3.11 + FastAPI + jmcomic
-- **热重载**: 支持（开发模式下代码修改会自动重载）
-
-### 前端服务 (frontend)
-
-- **端口**: 80
-- **技术栈**: Node.js 22 + Vue 3 + Vite + Nginx
-- **反向代理**: Nginx 自动将 `/api` 请求代理到后端服务
-
-## 开发模式
-
-如果需要在开发模式下运行并实时查看代码变更：
-
-```bash
-# 构建镜像
-docker-compose build
-
-# 启动服务（前台运行，显示日志）
-docker-compose up
-
-# 重新构建并启动
-docker-compose up --build
-```
-
-## 生产环境部署
-
-生产环境建议：
-
-1. 修改 `docker-compose.yml` 中的端口映射
-2. 配置环境变量（如数据库连接、API 密钥等）
-3. 使用 Nginx 反向代理并配置 SSL 证书
-4. 配置持久化存储卷
-
-### 自定义端口
-
-编辑 `docker-compose.yml`：
+编辑 `docker-compose.yml` 中的 `ports` 字段：
 
 ```yaml
 services:
   frontend:
     ports:
-      - "8080:80"  # 将前端改为 8080 端口
+      - "8080:80"    # 前端改为 8080
   backend:
     ports:
-      - "8888:8000"  # 将后端改为 8888 端口
+      - "8888:8000"  # 后端改为 8888
 ```
 
 ## 故障排查
 
-### 容器无法启动
+**构建失败 / jmcomic 相关报错**
 
 ```bash
-# 查看容器状态
-docker-compose ps
-
-# 查看详细日志
-docker-compose logs backend
-docker-compose logs frontend
+git submodule update --init
+docker compose build --no-cache
 ```
 
-### 前端无法连接后端
+**前端无法请求后端**
 
-检查 `frontend/nginx.conf` 中的代理配置，确保 `proxy_pass` 指向正确的后端服务名称。
+检查 `frontend/nginx.conf` 中 `proxy_pass` 是否为 `http://backend:8000`，两个服务需在同一 Docker 网络（`comic-network`）中。
 
-### 重新构建镜像
+**清理重来**
 
 ```bash
-# 清理旧镜像
-docker-compose down --rmi all
-
-# 重新构建
-docker-compose build --no-cache
-
-# 启动
-docker-compose up -d
+docker compose down --rmi all -v
+docker compose up --build -d
 ```
 
 ## 项目结构
 
 ```
 comic-web/
-├── docker-compose.yml       # Docker Compose 配置
-├── .dockerignore           # Docker 忽略文件
+├── docker-compose.yml       # Compose 配置（生产模式）
+├── .dockerignore
 ├── backend/
-│   ├── Dockerfile          # 后端 Docker 镜像配置
-│   ├── main.py            # FastAPI 应用入口
-│   └── requirements.txt   # Python 依赖
+│   ├── Dockerfile
+│   ├── main.py              # FastAPI 入口，缓存目录 ./chapter_cache
+│   └── requirements.txt
 ├── frontend/
-│   ├── Dockerfile         # 前端 Docker 镜像配置
-│   ├── nginx.conf        # Nginx 配置
-│   ├── package.json      # Node.js 依赖
-│   └── src/              # Vue 源码
-└── jmcomic/              # jmcomic Python 包
+│   ├── Dockerfile           # 多阶段构建：Node 编译 → Nginx 服务
+│   ├── nginx.conf           # SPA 路由 + /api 反代
+│   └── src/
+└── jmcomic/                 # git submodule
 ```
-
-## 更多帮助
-
-如有问题，请查看：
-- [Docker 官方文档](https://docs.docker.com/)
-- [Docker Compose 文档](https://docs.docker.com/compose/)
-- 项目 API 文档：http://localhost:8000/docs

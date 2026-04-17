@@ -8,7 +8,7 @@ const props = defineProps({
   priority: { type: Number, default: 0 },
   sequential: { type: Boolean, default: false },
   placeholder: { type: String, default: '' },
-  shouldLoad: { default: null }, // null = IntersectionObserver 控制；true/false = 外部控制
+  shouldLoad: { default: null },
 })
 
 const emit = defineEmits(['loaded', 'error'])
@@ -20,11 +20,31 @@ const hasError = ref(false)
 const currentSrc = ref(props.placeholder || placeholderSrc.value)
 
 let observer = null
+let activeRequestId = 0
+let mounted = false
 
-// 加载图片
+function clearObserver() {
+  if (observer) {
+    observer.disconnect()
+    observer = null
+  }
+}
+
+function resetState() {
+  activeRequestId += 1
+  isLoaded.value = false
+  isLoading.value = false
+  hasError.value = false
+  currentSrc.value = props.placeholder || placeholderSrc.value
+  clearObserver()
+}
+
 async function loadImage() {
-  if (isLoaded.value || isLoading.value) return
+  if (!props.src || isLoaded.value || isLoading.value) {
+    return Promise.resolve()
+  }
 
+  const requestId = ++activeRequestId
   isLoading.value = true
   hasError.value = false
 
@@ -32,6 +52,11 @@ async function loadImage() {
     const img = new Image()
 
     img.onload = () => {
+      if (requestId !== activeRequestId) {
+        resolve()
+        return
+      }
+
       currentSrc.value = props.src
       isLoaded.value = true
       isLoading.value = false
@@ -40,6 +65,11 @@ async function loadImage() {
     }
 
     img.onerror = () => {
+      if (requestId !== activeRequestId) {
+        resolve()
+        return
+      }
+
       hasError.value = true
       isLoading.value = false
       emit('error')
@@ -50,56 +80,39 @@ async function loadImage() {
   })
 }
 
-// 外部控制加载：shouldLoad 变为 true 时触发
 watch(() => props.shouldLoad, (val) => {
-  if (val === true) loadImage()
+  if (val === true) {
+    loadImage()
+  }
 }, { immediate: true })
 
-// 设置 Intersection Observer
 function setupObserver() {
-  if (!imgRef.value) return
+  if (!imgRef.value || props.shouldLoad !== null || props.sequential) return
 
-  // 根据 sequential 属性决定 rootMargin
-  // sequential 模式（阅读器）：不预加载，由代码控制
-  // 非 sequential 模式（列表页）：提前 50px 预加载
-  const rootMargin = props.sequential ? '0px' : '50px'
-
+  clearObserver()
   observer = new IntersectionObserver(
     (entries) => {
       entries.forEach((entry) => {
-        if (entry.isIntersecting) {
-          // 进入视口时加载图片
-          if (props.sequential) {
-            // 顺序加载：仅触发事件，不自动加载（由父组件控制）
-            imgRef.value.dispatchEvent(new CustomEvent('visible', { bubbles: true }))
-          } else {
-            // 列表页：自动加载可见图片
-            loadImage()
-          }
-          // 加载后停止观察
-          if (observer && imgRef.value) {
-            observer.unobserve(imgRef.value)
-          }
-        }
+        if (!entry.isIntersecting) return
+
+        loadImage()
+        clearObserver()
       })
     },
     {
-      rootMargin: rootMargin,
+      rootMargin: '50px',
       threshold: 0.01,
-    }
+    },
   )
 
   observer.observe(imgRef.value)
 }
 
-// 重试加载
 function retry() {
   hasError.value = false
-  isLoaded.value = false
   loadImage()
 }
 
-// 暴露加载方法给父组件
 defineExpose({
   loadImage,
   isLoaded,
@@ -107,30 +120,32 @@ defineExpose({
 })
 
 onMounted(() => {
-  // shouldLoad 由外部控制时，不使用 observer
-  if (props.shouldLoad !== null) return
-  // sequential 模式完全由父组件控制
-  if (!props.sequential) {
-    setupObserver()
+  mounted = true
+
+  if (props.shouldLoad === true) {
+    loadImage()
+    return
   }
+
+  setupObserver()
 })
 
 onUnmounted(() => {
-  if (observer && imgRef.value) {
-    observer.unobserve(imgRef.value)
-  }
+  mounted = false
+  resetState()
 })
 
-// 监听 src 变化
 watch(() => props.src, () => {
-  if (isLoaded.value) {
-    isLoaded.value = false
-    currentSrc.value = props.placeholder || placeholderSrc.value
-    if (props.shouldLoad !== null) return
-    if (!props.sequential) {
-      setupObserver()
-    }
+  resetState()
+
+  if (!mounted) return
+
+  if (props.shouldLoad === true) {
+    loadImage()
+    return
   }
+
+  setupObserver()
 })
 </script>
 
@@ -143,12 +158,10 @@ watch(() => props.src, () => {
       :class="['lazy-image', { loaded: isLoaded, loading: isLoading }]"
     />
 
-    <!-- 加载状态 -->
     <div v-if="isLoading" class="lazy-loading">
       <div class="lazy-spinner"></div>
     </div>
 
-    <!-- 错误状态 -->
     <div v-if="hasError" class="lazy-error" @click="retry">
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
@@ -158,11 +171,9 @@ watch(() => props.src, () => {
       <span>加载失败，点击重试</span>
     </div>
 
-    <!-- shimmer 占位（仅 shimmer 风格时显示） -->
     <div v-if="isShimmerStyle && !isLoaded && !hasError" class="lazy-placeholder">
       <div class="lazy-placeholder-shimmer"></div>
     </div>
-
   </div>
 </template>
 
@@ -206,7 +217,9 @@ watch(() => props.src, () => {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .lazy-error {
@@ -249,8 +262,12 @@ watch(() => props.src, () => {
 }
 
 @keyframes shimmer {
-  0%   { background-position: -200% 0; }
-  100% { background-position:  200% 0; }
-}
+  0% {
+    background-position: -200% 0;
+  }
 
+  100% {
+    background-position: 200% 0;
+  }
+}
 </style>

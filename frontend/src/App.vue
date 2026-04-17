@@ -1,6 +1,8 @@
 <script setup>
 import AppHeader from './components/AppHeader.vue'
 import './utils/theme.js'
+
+const cachedViews = ['HomeView', 'SearchView', 'RankingView', 'FavoritesView']
 </script>
 
 <template>
@@ -9,7 +11,9 @@ import './utils/theme.js'
     <main class="app-main">
       <router-view v-slot="{ Component }">
         <transition name="fade" mode="out-in">
-          <component :is="Component" />
+          <keep-alive :include="cachedViews">
+            <component :is="Component" />
+          </keep-alive>
         </transition>
       </router-view>
     </main>

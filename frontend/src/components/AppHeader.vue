@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import IconSearch from './icons/IconSearch.vue'
 import IconMenu from './icons/IconMenu.vue'
@@ -7,27 +7,88 @@ import IconX from './icons/IconX.vue'
 import { queueItems, activeCount, groupedQueue, initQueue, refreshQueue, clearCompleted, isPolling } from '../utils/cacheQueue'
 import { theme, toggleTheme } from '../utils/theme'
 
+const HISTORY_KEY = 'search_history'
+const MAX_HISTORY = 10
+
 const router = useRouter()
 const keyword = ref('')
 const mobileMenuOpen = ref(false)
 const showCachePanel = ref(false)
+const showHistory = ref(false)
+const searchHistory = ref([])
+
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY)
+    searchHistory.value = raw ? JSON.parse(raw) : []
+  } catch {
+    searchHistory.value = []
+  }
+}
+
+function saveHistory(q) {
+  const list = searchHistory.value.filter(item => item !== q)
+  list.unshift(q)
+  searchHistory.value = list.slice(0, MAX_HISTORY)
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(searchHistory.value))
+}
+
+function removeHistory(q) {
+  searchHistory.value = searchHistory.value.filter(item => item !== q)
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(searchHistory.value))
+}
+
+function clearHistory() {
+  searchHistory.value = []
+  localStorage.removeItem(HISTORY_KEY)
+}
+
+const filteredHistory = computed(() => {
+  const q = keyword.value.trim()
+  if (!q) return searchHistory.value
+  return searchHistory.value.filter(item => item.includes(q))
+})
+
 function toggleCachePanel() {
   showCachePanel.value = !showCachePanel.value
   if (showCachePanel.value) refreshQueue()
 }
 
-function handleSearch() {
-  const q = keyword.value.trim()
-  if (!q) return
-  router.push({ name: 'Search', query: { q } })
+function handleSearch(q) {
+  const term = (q ?? keyword.value).trim()
+  if (!term) return
+  keyword.value = term
+  saveHistory(term)
+  showHistory.value = false
+  router.push({ name: 'Search', query: { q: term } })
   mobileMenuOpen.value = false
+}
+
+function onSearchFocus() {
+  showHistory.value = true
 }
 
 function toggleMenu() {
   mobileMenuOpen.value = !mobileMenuOpen.value
 }
 
-onMounted(() => { initQueue() })
+function onClickOutside(e) {
+  const bar = document.querySelector('.search-bar')
+  const mobileSearch = document.querySelector('.mobile-search')
+  if (bar && !bar.contains(e.target) && (!mobileSearch || !mobileSearch.contains(e.target))) {
+    showHistory.value = false
+  }
+}
+
+onMounted(() => {
+  initQueue()
+  loadHistory()
+  document.addEventListener('click', onClickOutside)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', onClickOutside)
+})
 </script>
 
 <template>
@@ -77,9 +138,17 @@ onMounted(() => { initQueue() })
 
             <div v-else class="panel-list">
               <div v-for="group in groupedQueue" :key="group.albumId" class="group-item">
-                <div class="group-title">{{ group.albumTitle }}</div>
+                <div class="group-header">
+                  <span class="group-title">{{ group.albumTitle }}</span>
+                  <span
+                    :class="['group-stats', {
+                      'stats-done': group.chapters.filter(c => c.status === 'ready').length === group.chapters.length,
+                      'stats-error': group.chapters.some(c => c.status === 'error') && group.chapters.filter(c => c.status === 'ready').length < group.chapters.length,
+                    }]"
+                  >{{ group.chapters.filter(c => c.status === 'ready').length }}/{{ group.chapters.length }}</span>
+                </div>
                 <div v-for="ch in group.chapters" :key="ch.photo_id" class="chapter-row">
-                  <span class="ch-title">{{ ch.chapterTitle || ch.photo_id }}</span>
+                  <span class="ch-title">{{ ch.chapterTitle || `章节 ${ch.photo_id}` }}</span>
                   <div class="ch-right">
                     <div v-if="ch.status === 'downloading'" class="ch-bar-wrap">
                       <div class="ch-bar" :style="{ width: ch.progress + '%' }"></div>
@@ -100,7 +169,7 @@ onMounted(() => { initQueue() })
         </transition>
       </div>
 
-      <form class="search-bar" @submit.prevent="handleSearch" role="search">
+      <form class="search-bar" @submit.prevent="handleSearch()" role="search" @click.stop>
         <IconSearch class="search-icon" />
         <input
           v-model="keyword"
@@ -108,7 +177,28 @@ onMounted(() => { initQueue() })
           placeholder="搜索漫画、作者、标签..."
           aria-label="搜索漫画"
           class="search-input"
+          @focus="onSearchFocus"
+          autocomplete="off"
         />
+        <transition name="history-fade">
+          <div v-if="showHistory && filteredHistory.length" class="history-panel">
+            <div class="history-header">
+              <span class="history-title">搜索历史</span>
+              <button type="button" class="history-clear" @click.prevent="clearHistory">清除</button>
+            </div>
+            <ul class="history-list">
+              <li v-for="item in filteredHistory" :key="item" class="history-item">
+                <button type="button" class="history-term" @click.prevent="handleSearch(item)">
+                  <IconSearch class="history-icon" />
+                  {{ item }}
+                </button>
+                <button type="button" class="history-del" @click.prevent="removeHistory(item)" aria-label="删除">
+                  <IconX class="history-del-icon" />
+                </button>
+              </li>
+            </ul>
+          </div>
+        </transition>
       </form>
 
       <router-link to="/login" class="login-link nav-link">登录</router-link>
@@ -152,7 +242,7 @@ onMounted(() => { initQueue() })
           <router-link to="/settings" class="mobile-link" @click="mobileMenuOpen = false">设置</router-link>
           <router-link to="/login" class="mobile-link" @click="mobileMenuOpen = false">登录</router-link>
         </nav>
-        <form class="mobile-search" @submit.prevent="handleSearch" role="search">
+        <form class="mobile-search" @submit.prevent="handleSearch()" role="search" @click.stop>
           <IconSearch class="search-icon" />
           <input
             v-model="keyword"
@@ -160,7 +250,28 @@ onMounted(() => { initQueue() })
             placeholder="搜索漫画..."
             aria-label="搜索漫画"
             class="search-input"
+            @focus="onSearchFocus"
+            autocomplete="off"
           />
+          <transition name="history-fade">
+            <div v-if="showHistory && filteredHistory.length" class="history-panel history-panel--mobile">
+              <div class="history-header">
+                <span class="history-title">搜索历史</span>
+                <button type="button" class="history-clear" @click.prevent="clearHistory">清除</button>
+              </div>
+              <ul class="history-list">
+                <li v-for="item in filteredHistory" :key="item" class="history-item">
+                  <button type="button" class="history-term" @click.prevent="handleSearch(item)">
+                    <IconSearch class="history-icon" />
+                    {{ item }}
+                  </button>
+                  <button type="button" class="history-del" @click.prevent="removeHistory(item)" aria-label="删除">
+                    <IconX class="history-del-icon" />
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </transition>
         </form>
       </div>
     </transition>
@@ -466,15 +577,33 @@ onMounted(() => { initQueue() })
 
 .group-item:last-child { border-bottom: none; }
 
+.group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .group-title {
   font-size: 12px;
   font-weight: 600;
   color: var(--color-text-muted);
-  margin-bottom: 8px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
 }
+
+.group-stats {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.group-stats.stats-done { color: #16a34a; }
+.group-stats.stats-error { color: #dc2626; }
 
 .chapter-row {
   display: flex;
@@ -518,7 +647,7 @@ onMounted(() => { initQueue() })
 .ch-status {
   font-size: 12px;
   font-weight: 600;
-  min-width: 28px;
+  min-width: 36px;
   text-align: right;
 }
 
@@ -571,4 +700,120 @@ onMounted(() => { initQueue() })
   font-weight: 500;
 }
 .panel-library-link:hover { text-decoration: underline; }
+
+/* 搜索历史面板 */
+.search-bar {
+  position: relative;
+}
+
+.history-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  z-index: 200;
+  overflow: hidden;
+}
+
+.history-panel--mobile {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+}
+
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 6px;
+}
+
+.history-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.history-clear {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  transition: color 0.15s;
+}
+
+.history-clear:hover {
+  color: var(--color-primary);
+}
+
+.history-list {
+  list-style: none;
+  padding: 0 0 6px;
+  margin: 0;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+}
+
+.history-term {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  text-align: left;
+  transition: background 0.15s, color 0.15s;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.history-term:hover {
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+}
+
+.history-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+
+.history-del {
+  padding: 7px 10px;
+  color: var(--color-text-muted);
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+
+.history-del:hover {
+  color: var(--color-text);
+}
+
+.history-del-icon {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+
+.history-fade-enter-active,
+.history-fade-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.history-fade-enter-from,
+.history-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
 </style>

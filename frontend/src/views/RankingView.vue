@@ -1,17 +1,34 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+defineOptions({ name: 'RankingView' })
+import { ref, computed, onMounted } from 'vue'
 import { getRanking } from '../api'
 import ComicCard from '../components/ComicCard.vue'
 import SkeletonGrid from '../components/SkeletonGrid.vue'
+import { usePagedList } from '../composables/usePagedList'
 
-const comics = ref([])
-const loading = ref(true)
-const page = ref(1)
-const hasMore = ref(false)
-const loadingMore = ref(false)
 const rankType = ref('day')
 const category = ref('0')
-const pageCount = ref(0)
+
+const CONCURRENCY = 4
+const loadedCount = ref(0)
+const loadableCount = computed(() => loadedCount.value + CONCURRENCY)
+
+function onImageReady() {
+  loadedCount.value++
+}
+
+const {
+  items: comics,
+  loading,
+  error,
+  hasMore,
+  loadingMore,
+  refresh,
+  loadMore,
+} = usePagedList({
+  fetchPage: ({ page }) => getRanking(rankType.value, { page, category: category.value }),
+  getErrorMessage: () => '加载排行榜失败，请稍后重试',
+})
 
 const rankTypes = [
   { value: 'all', label: '总榜' },
@@ -33,54 +50,30 @@ const categories = [
   { value: 'another', label: '其他' },
 ]
 
-async function fetchRanking() {
-  try {
-    loading.value = true
-    page.value = 1
-    const data = await getRanking(rankType.value, { page: 1, category: category.value })
-    comics.value = data.items || []
-    pageCount.value = data.page_count || 0
-    hasMore.value = page.value < pageCount.value
-  } catch {
-    comics.value = []
-  } finally {
-    loading.value = false
-  }
-}
-
-async function loadMore() {
-  if (loadingMore.value || !hasMore.value) return
-  try {
-    loadingMore.value = true
-    page.value++
-    const data = await getRanking(rankType.value, { page: page.value, category: category.value })
-    comics.value.push(...(data.items || []))
-    hasMore.value = page.value < (data.page_count || 0)
-  } catch {
-    page.value--
-  } finally {
-    loadingMore.value = false
-  }
-}
-
 function changeType(val) {
   rankType.value = val
-  fetchRanking()
+  loadedCount.value = 0
+  refresh()
 }
 
 function changeCategory(val) {
   category.value = val
-  fetchRanking()
+  loadedCount.value = 0
+  refresh()
 }
 
-onMounted(fetchRanking)
+function onMountedFetch() {
+  loadedCount.value = 0
+  refresh()
+}
+
+onMounted(onMountedFetch)
 </script>
 
 <template>
   <div class="ranking-view">
     <div class="container">
       <div class="layout">
-        <!-- Left: Category sidebar -->
         <aside class="sidebar">
           <h3 class="sidebar-title">类别</h3>
           <nav class="cat-nav">
@@ -93,7 +86,6 @@ onMounted(fetchRanking)
           </nav>
         </aside>
 
-        <!-- Right: Main content -->
         <div class="main">
           <div class="toolbar">
             <h1 class="page-title">排行榜</h1>
@@ -107,7 +99,6 @@ onMounted(fetchRanking)
             </div>
           </div>
 
-          <!-- Mobile category chips -->
           <div class="mobile-cats">
             <button
               v-for="c in categories"
@@ -119,16 +110,27 @@ onMounted(fetchRanking)
 
           <SkeletonGrid v-if="loading" :count="12" />
 
+          <div v-else-if="error" class="empty-state">
+            <p>{{ error }}</p>
+            <button class="load-more-btn" @click="refresh">重试</button>
+          </div>
+
           <div v-else-if="!comics.length" class="empty-state">
-            <p>暂无排行数据</p>
+            <p>暂无排行榜数据</p>
           </div>
 
           <div v-else class="comic-grid">
-            <ComicCard v-for="c in comics" :key="c.id" :comic="c" />
+            <ComicCard
+              v-for="(c, index) in comics"
+              :key="c.id"
+              :comic="c"
+              :shouldLoad="index < loadableCount"
+              @imageReady="onImageReady"
+            />
           </div>
 
           <div v-if="!loading && hasMore" class="load-more">
-            <button class="load-more-btn" :disabled="loadingMore" @click="loadMore">
+            <button class="load-more-btn" :disabled="loadingMore" @click="loadMore()">
               {{ loadingMore ? '加载中...' : '加载更多' }}
             </button>
           </div>
@@ -139,7 +141,9 @@ onMounted(fetchRanking)
 </template>
 
 <style scoped>
-.ranking-view { padding: 20px 0 40px; }
+.ranking-view {
+  padding: 20px 0 40px;
+}
 
 .container {
   max-width: 1280px;
@@ -153,7 +157,6 @@ onMounted(fetchRanking)
   align-items: flex-start;
 }
 
-/* Sidebar */
 .sidebar {
   width: 140px;
   flex-shrink: 0;
@@ -202,7 +205,6 @@ onMounted(fetchRanking)
   font-weight: 600;
 }
 
-/* Main content */
 .main {
   flex: 1;
   min-width: 0;
