@@ -473,8 +473,8 @@ def chapter_image(photo_id: str, index: int):
 
 # ---- User / Auth ----
 
-# Simple password protection - you can change this
-SITE_PASSWORD = "wyq678"
+# Simple password protection - override with SITE_PASSWORD in the environment for deployment.
+SITE_PASSWORD = os.getenv("SITE_PASSWORD", "wyq678")
 
 class LoginRequest(BaseModel):
     password: str
