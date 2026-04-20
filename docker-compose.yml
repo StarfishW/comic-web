@@ -10,6 +10,7 @@ services:
       - "8000:8000"
     volumes:
       - comic_cache:/app/backend/chapter_cache
+      - ./backend/site_data.db:/app/backend/site_data.db
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
