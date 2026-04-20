@@ -13,3 +13,4 @@ frontend/dist/
 .claude/
 backend/chapter_cache/
 backend/site_data.db
+backend/data/*.db

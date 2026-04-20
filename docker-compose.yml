@@ -10,9 +10,10 @@ services:
       - "8000:8000"
     volumes:
       - comic_cache:/app/backend/chapter_cache
-      - ./backend/site_data.db:/app/backend/site_data.db
+      - ./backend/data:/app/backend/data
     environment:
       - PYTHONUNBUFFERED=1
+      - SITE_DB_PATH=/app/backend/data/site_data.db
     restart: unless-stopped
     networks:
       - comic-network

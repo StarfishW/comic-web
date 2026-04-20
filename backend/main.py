@@ -78,6 +78,11 @@ async def lifespan(app: FastAPI):
     try:
         site_store.init_site_storage()
         print("[backend] site storage initialized")
+    except Exception as e:
+        print(f"[backend] site storage init failed: {e}")
+        raise
+
+    try:
         get_client()
         print("[backend] jmcomic client initialized")
     except Exception as e:

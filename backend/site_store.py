@@ -13,7 +13,8 @@ from typing import Optional
 
 from fastapi import Header, HTTPException
 
-DB_PATH = Path(__file__).with_name("site_data.db")
+DEFAULT_DB_PATH = Path(__file__).with_name("site_data.db")
+DB_PATH = Path(os.getenv("SITE_DB_PATH", str(DEFAULT_DB_PATH))).expanduser()
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
@@ -21,8 +22,16 @@ def _now_ts() -> int:
     return int(time.time())
 
 
+def _ensure_db_target() -> None:
+    if DB_PATH.exists() and DB_PATH.is_dir():
+        raise RuntimeError(f"Database path is a directory, not a file: {DB_PATH}")
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
 @contextmanager
 def db_conn():
+    _ensure_db_target()
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -106,7 +115,7 @@ def _serialize_chapter_progress(row) -> dict:
 
 
 def init_site_storage() -> None:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_db_target()
     with db_conn() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute(
