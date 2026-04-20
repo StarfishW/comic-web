@@ -1,11 +1,12 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import IconSearch from './icons/IconSearch.vue'
 import IconMenu from './icons/IconMenu.vue'
 import IconX from './icons/IconX.vue'
 import { queueItems, activeCount, groupedQueue, initQueue, refreshQueue, clearCompleted, isPolling } from '../utils/cacheQueue'
 import { theme, toggleTheme } from '../utils/theme'
+import { authState, getUserLabel, isAdminUser, logoutUser } from '../utils/auth'
 
 const HISTORY_KEY = 'search_history'
 const MAX_HISTORY = 10
@@ -16,6 +17,16 @@ const mobileMenuOpen = ref(false)
 const showCachePanel = ref(false)
 const showHistory = ref(false)
 const searchHistory = ref([])
+const loggingOut = ref(false)
+
+const filteredHistory = computed(() => {
+  const q = keyword.value.trim()
+  if (!q) return searchHistory.value
+  return searchHistory.value.filter(item => item.includes(q))
+})
+
+const currentUserLabel = computed(() => getUserLabel(authState.user))
+const showAdminEntry = computed(() => isAdminUser(authState.user))
 
 function loadHistory() {
   try {
@@ -43,12 +54,6 @@ function clearHistory() {
   localStorage.removeItem(HISTORY_KEY)
 }
 
-const filteredHistory = computed(() => {
-  const q = keyword.value.trim()
-  if (!q) return searchHistory.value
-  return searchHistory.value.filter(item => item.includes(q))
-})
-
 function toggleCachePanel() {
   showCachePanel.value = !showCachePanel.value
   if (showCachePanel.value) refreshQueue()
@@ -70,6 +75,19 @@ function onSearchFocus() {
 
 function toggleMenu() {
   mobileMenuOpen.value = !mobileMenuOpen.value
+}
+
+async function handleLogout() {
+  try {
+    loggingOut.value = true
+    await logoutUser()
+    mobileMenuOpen.value = false
+    showCachePanel.value = false
+    showHistory.value = false
+    router.push({ name: 'Login' })
+  } finally {
+    loggingOut.value = false
+  }
 }
 
 function onClickOutside(e) {
@@ -201,7 +219,14 @@ onUnmounted(() => {
         </transition>
       </form>
 
-      <router-link to="/login" class="login-link nav-link">登录</router-link>
+      <div v-if="authState.user" class="auth-actions" @click.stop>
+        <span class="user-chip" :title="currentUserLabel">{{ currentUserLabel }}</span>
+        <router-link v-if="showAdminEntry" to="/admin/users" class="nav-link auth-link">管理</router-link>
+        <button class="nav-link auth-link auth-logout" :disabled="loggingOut" @click="handleLogout">
+          {{ loggingOut ? '退出中...' : '退出' }}
+        </button>
+      </div>
+      <router-link v-else to="/login" class="login-link nav-link">登录</router-link>
 
       <!-- 主题切换 -->
       <button class="theme-btn" @click.stop="toggleTheme" :title="theme === 'dark' ? '切换为亮色' : '切换为暗色'">
@@ -234,13 +259,28 @@ onUnmounted(() => {
     <transition name="slide">
       <div v-if="mobileMenuOpen" class="mobile-menu">
         <nav class="mobile-nav">
+          <div v-if="authState.user" class="mobile-user-card">
+            <span class="mobile-user-label">当前用户</span>
+            <strong class="mobile-user-name">{{ currentUserLabel }}</strong>
+          </div>
           <router-link to="/" class="mobile-link" @click="mobileMenuOpen = false">首页</router-link>
           <router-link to="/ranking" class="mobile-link" @click="mobileMenuOpen = false">排行榜</router-link>
           <router-link to="/favorites" class="mobile-link" @click="mobileMenuOpen = false">收藏</router-link>
           <router-link to="/history" class="mobile-link" @click="mobileMenuOpen = false">历史</router-link>
           <router-link to="/cache" class="mobile-link" @click="mobileMenuOpen = false">缓存库</router-link>
           <router-link to="/settings" class="mobile-link" @click="mobileMenuOpen = false">设置</router-link>
-          <router-link to="/login" class="mobile-link" @click="mobileMenuOpen = false">登录</router-link>
+          <router-link
+            v-if="showAdminEntry"
+            to="/admin/users"
+            class="mobile-link"
+            @click="mobileMenuOpen = false"
+          >
+            管理员
+          </router-link>
+          <router-link v-if="!authState.user" to="/login" class="mobile-link" @click="mobileMenuOpen = false">登录</router-link>
+          <button v-else class="mobile-link mobile-link-button" :disabled="loggingOut" @click="handleLogout">
+            {{ loggingOut ? '退出中...' : '退出登录' }}
+          </button>
         </nav>
         <form class="mobile-search" @submit.prevent="handleSearch()" role="search" @click.stop>
           <IconSearch class="search-icon" />
@@ -339,6 +379,39 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+.auth-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.user-chip {
+  max-width: 160px;
+  padding: 0 12px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.auth-link {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+.auth-logout:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .search-bar {
   flex: 1;
   max-width: 360px;
@@ -401,6 +474,26 @@ onUnmounted(() => {
   gap: 2px;
 }
 
+.mobile-user-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  margin-bottom: 6px;
+  border-radius: var(--radius-md);
+  background: var(--color-primary-light);
+}
+
+.mobile-user-label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.mobile-user-name {
+  font-size: 15px;
+  color: var(--color-primary);
+}
+
 .mobile-link {
   padding: 10px 14px;
   border-radius: var(--radius-sm);
@@ -414,6 +507,18 @@ onUnmounted(() => {
 .mobile-link.router-link-active {
   color: var(--color-primary);
   background: var(--color-primary-light);
+}
+
+.mobile-link-button {
+  width: 100%;
+  border: none;
+  background: none;
+  text-align: left;
+}
+
+.mobile-link-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
 }
 
 .mobile-search {
@@ -440,14 +545,15 @@ onUnmounted(() => {
 }
 
 .slide-enter-to {
-  max-height: 300px;
+  max-height: 520px;
   opacity: 1;
 }
 
 @media (max-width: 768px) {
   .nav-desktop,
   .search-bar,
-  .login-link {
+  .login-link,
+  .auth-actions {
     display: none;
   }
 

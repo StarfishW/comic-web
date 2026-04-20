@@ -12,3 +12,4 @@ frontend/node_modules/
 frontend/dist/
 .claude/
 backend/chapter_cache/
+backend/site_data.db

@@ -1,14 +1,40 @@
 import axios from 'axios'
 
+const AUTH_TOKEN_KEY = 'auth_token'
+const AUTH_USER_KEY = 'auth_user'
+const AUTH_FLAG_KEY = 'is_authenticated'
+
+function getStoredToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY) || ''
+}
+
+function clearStoredAuth() {
+  localStorage.removeItem(AUTH_TOKEN_KEY)
+  localStorage.removeItem(AUTH_USER_KEY)
+  localStorage.removeItem(AUTH_FLAG_KEY)
+  window.dispatchEvent(new CustomEvent('auth:changed'))
+}
+
 const http = axios.create({
   baseURL: '/api',
   timeout: 30000,
   headers: { 'Content-Type': 'application/json' },
 })
 
+http.interceptors.request.use((config) => {
+  const token = getStoredToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
 http.interceptors.response.use(
   (res) => res.data,
   (err) => {
+    if (err.response?.status === 401) {
+      clearStoredAuth()
+    }
     console.error('[API Error]', err.response?.status, err.message)
     return Promise.reject(err)
   },
@@ -40,15 +66,52 @@ export const getChapterImageUrl = (photoId, index) =>
   `/api/chapters/${photoId}/images/${index}`
 
 // ---- Auth ----
-export const login = (password) =>
-  http.post('/auth/login', { password })
+export const login = (username, password) =>
+  http.post('/auth/login', { username, password })
+
+export const logout = () =>
+  http.post('/auth/logout')
+
+export const getCurrentUser = () =>
+  http.get('/auth/me')
+
+export const getAdminUsers = () =>
+  http.get('/admin/users')
+
+export const createAdminUser = (payload) =>
+  http.post('/admin/users', payload)
 
 // ---- Favorites ----
 export const getFavorites = (params = {}) =>
   http.get('/favorites', { params })
 
-export const addFavorite = (albumId, folderId = '0') =>
-  http.post('/favorites', { album_id: albumId, folder_id: folderId })
+export const getFavoriteStatus = (albumId) =>
+  http.get(`/favorites/${albumId}/status`)
+
+export const addFavorite = (albumId, payload = {}) =>
+  http.post('/favorites', { album_id: albumId, ...payload })
+
+export const removeFavorite = (albumId) =>
+  http.delete(`/favorites/${albumId}`)
+
+// ---- History / Reading ----
+export const getHistory = (params = {}) =>
+  http.get('/history', { params })
+
+export const upsertHistory = (payload) =>
+  http.post('/history', payload)
+
+export const removeHistory = (albumId) =>
+  http.delete(`/history/${albumId}`)
+
+export const clearHistory = () =>
+  http.delete('/history')
+
+export const saveReadingProgress = (payload) =>
+  http.post('/reading/progress', payload)
+
+export const getReadingState = (albumId) =>
+  http.get(`/reading/${albumId}`)
 
 // ---- Comment ----
 export const postComment = (videoId, comment, commentId = null) =>

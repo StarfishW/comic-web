@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { pingDomains, switchDomain } from '../api'
+import { pingDomains, switchDomain, logout as requestLogout } from '../api'
 import { placeholderStyle, setPlaceholderStyle, PLACEHOLDER_STYLES } from '../utils/placeholder'
 import { viewMode, setViewMode } from '../utils/viewMode'
 
@@ -41,10 +41,18 @@ async function handleSwitch(domain) {
   }
 }
 
-function handleLogout() {
-  localStorage.removeItem('auth_token')
-  localStorage.removeItem('is_authenticated')
-  router.push('/login')
+async function handleLogout() {
+  try {
+    await requestLogout()
+  } catch {
+    // Clear local auth even if the server session is already gone.
+  } finally {
+    localStorage.removeItem('auth_token')
+    localStorage.removeItem('auth_user')
+    localStorage.removeItem('is_authenticated')
+    window.dispatchEvent(new CustomEvent('auth:changed'))
+    router.push('/login')
+  }
 }
 
 function latencyColor(latency) {

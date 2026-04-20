@@ -1,44 +1,76 @@
 <script setup>
 defineOptions({ name: 'FavoritesView' })
-import { ref, computed, onMounted } from 'vue'
-import { getFavorites } from '../api'
+
+import { computed, onMounted, ref } from 'vue'
+import * as api from '../api'
 import ComicCard from '../components/ComicCard.vue'
 import SkeletonGrid from '../components/SkeletonGrid.vue'
 import { usePagedList } from '../composables/usePagedList'
 
-const folders = ref([])
-const currentFolder = ref('0')
-
 const CONCURRENCY = 4
+
 const loadedCount = ref(0)
 const loadableCount = computed(() => loadedCount.value + CONCURRENCY)
 
 function onImageReady() {
-  loadedCount.value++
+  loadedCount.value += 1
+}
+
+function normalizeComic(item) {
+  const authors = Array.isArray(item?.authors) ? item.authors.filter(Boolean).join(', ') : ''
+  const id = item?.id ?? item?.album_id ?? item?.albumId
+
+  return {
+    ...item,
+    id: id === undefined || id === null ? '' : String(id),
+    title: item?.title || item?.album_title || item?.name || 'Untitled',
+    author: item?.author || authors || item?.artist || '',
+    tags: Array.isArray(item?.tags) ? item.tags : [],
+  }
+}
+
+function resolveItems(data) {
+  if (Array.isArray(data)) return data
+
+  return [
+    data?.items,
+    data?.records,
+    data?.list,
+    data?.favorites,
+    data?.results,
+  ].find(Array.isArray) || []
+}
+
+function resolvePageCount(data) {
+  if (Array.isArray(data)) return 1
+  return Number(data?.page_count || data?.pages || data?.last_page || 1)
+}
+
+function resolveTotal(data) {
+  if (Array.isArray(data)) return data.length
+  return Number(data?.total || data?.count || resolveItems(data).length || 0)
 }
 
 const {
   items: comics,
   loading,
   error,
+  total,
   hasMore,
   loadingMore,
   refresh,
   loadMore,
 } = usePagedList({
-  fetchPage: ({ page }) => getFavorites({ page, folder_id: currentFolder.value }),
+  fetchPage: ({ page }) => api.getFavorites({ page }),
+  getItems: (data) => resolveItems(data).map(normalizeComic).filter((item) => item.id),
+  getPageCount: resolvePageCount,
+  getTotal: resolveTotal,
   getErrorMessage: () => '请先登录后再查看收藏',
 })
 
 async function fetchFavorites() {
   loadedCount.value = 0
-  const data = await refresh()
-  folders.value = data?.folders || []
-}
-
-function changeFolder(fid) {
-  currentFolder.value = fid
-  fetchFavorites()
+  await refresh()
 }
 
 onMounted(fetchFavorites)
@@ -47,19 +79,13 @@ onMounted(fetchFavorites)
 <template>
   <div class="favorites-view">
     <div class="container">
-      <h1 class="page-title">我的收藏</h1>
-
-      <div class="folder-tabs" v-if="folders.length">
-        <button
-          :class="['tab', { active: currentFolder === '0' }]"
-          @click="changeFolder('0')"
-        >全部</button>
-        <button
-          v-for="f in folders"
-          :key="f.id"
-          :class="['tab', { active: currentFolder === f.id }]"
-          @click="changeFolder(f.id)"
-        >{{ f.name }}</button>
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">我的收藏</h1>
+          <p class="page-subtitle">
+            {{ total ? `共 ${total} 部漫画` : '已接入站内收藏列表' }}
+          </p>
+        </div>
       </div>
 
       <SkeletonGrid v-if="loading" :count="8" />
@@ -70,15 +96,15 @@ onMounted(fetchFavorites)
       </div>
 
       <div v-else-if="!comics.length" class="empty-state">
-        <p>收藏夹为空</p>
+        <p>还没有收藏的漫画</p>
         <router-link to="/" class="link-home">去首页看看</router-link>
       </div>
 
       <div v-else class="comic-grid">
         <ComicCard
-          v-for="(c, index) in comics"
-          :key="c.id"
-          :comic="c"
+          v-for="(comic, index) in comics"
+          :key="comic.id"
+          :comic="comic"
           :shouldLoad="index < loadableCount"
           @imageReady="onImageReady"
         />
@@ -104,38 +130,23 @@ onMounted(fetchFavorites)
   padding: 0 20px;
 }
 
-.page-title {
-  font-size: 20px;
-  font-weight: 700;
-  margin-bottom: 16px;
-}
-
-.folder-tabs {
+.page-head {
   display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 20px;
 }
 
-.tab {
-  padding: 5px 14px;
-  border-radius: 16px;
+.page-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.page-subtitle {
   font-size: 13px;
-  font-weight: 500;
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-  transition: all 0.2s;
-}
-
-.tab:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-}
-
-.tab.active {
-  background: var(--color-primary);
-  color: #fff;
-  border-color: var(--color-primary);
+  color: var(--color-text-muted);
 }
 
 .comic-grid {
@@ -193,6 +204,10 @@ onMounted(fetchFavorites)
   .comic-grid {
     grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
     gap: 10px;
+  }
+
+  .page-head {
+    align-items: flex-start;
   }
 }
 </style>

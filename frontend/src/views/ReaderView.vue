@@ -1,15 +1,20 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useRouter } from "vue-router";
-import { getChapterDetail, getChapterImageUrl, startChapterCache, getChapterCacheStatus, getCachedImageUrl, getComicDetail } from "../api";
-import { startChapterPdf, getChapterPdfStatus, getChapterPdfDownloadUrl } from '../api'
+import * as api from "../api";
 import LazyImage from "../components/LazyImage.vue";
 import ImageLoader from "../utils/imageLoader";
 import { viewMode } from '../utils/viewMode'
+import { setDocumentTitle, resetDocumentTitle } from '../utils/documentTitle'
+import {
+  buildReadingProgressPayload,
+  formatEpisodeProgress,
+  mergeEpisodesWithReadingState,
+  normalizeReadingState,
+} from '../utils/reading'
 
-// 图片加载配置
 const LOADING_CONFIG = {
-  maxConcurrent: 5, // 最大并发数
+  maxConcurrent: 5,
 };
 
 const props = defineProps({ photoId: { type: String, required: true } });
@@ -18,7 +23,7 @@ const router = useRouter();
 const chapter = ref(null);
 const loading = ref(true);
 const error = ref(null);
-const mode = ref("scroll"); // 'scroll' | 'page'
+const mode = ref("scroll");
 const currentPage = ref(0);
 const showToolbar = ref(true);
 const showEpisodeList = ref(false);
@@ -33,15 +38,16 @@ const scrollPageRefs = ref([]);
 let chapterRequestId = 0;
 let sequentialStartTimer = null;
 let scrollFrame = null;
-let loadingCancelled = false; // 用于取消加载
+let loadingCancelled = false;
+let persistTimer = null;
+let pendingProgressPayload = null;
+let lastPersistFingerprint = '';
 
-// 缩放
 const zoom = ref(1.0)
 const ZOOM_MIN = 0.5
 const ZOOM_MAX = 3.0
 const ZOOM_STEP = 0.25
 
-// 翻页模式下的拖拽平移（缩放 > 1 时可用）
 const panX = ref(0)
 const panY = ref(0)
 const isPanning = ref(false)
@@ -49,14 +55,15 @@ let panStartX = 0
 let panStartY = 0
 let panOriginX = 0
 let panOriginY = 0
-const cacheStatus = ref(null)   // null | 'pending' | 'downloading' | 'ready' | 'error'
+const cacheStatus = ref(null)
 const cacheProgress = ref(0)
 let cachePoller = null
-const pdfStatus = ref(null)    // null | 'caching' | 'converting' | 'ready' | 'error'
+const pdfStatus = ref(null)
 const pdfProgress = ref(0)
 const pdfPhase = ref('')
 let pdfPoller = null
 let pdfDownloadTriggered = false
+const readingState = ref(normalizeReadingState({}, ''))
 
 function clearAsyncState() {
   if (cachePoller) {
@@ -77,11 +84,23 @@ function clearAsyncState() {
   }
 }
 
+function clearPersistTimer() {
+  if (persistTimer) {
+    clearTimeout(persistTimer)
+    persistTimer = null
+  }
+}
+
+function createPersistFingerprint(payload) {
+  if (!payload) return ''
+  return `${payload.album_id}:${payload.photo_id}:${payload.page_index}:${payload.total_pages}`
+}
+
 function startCachePolling(albumId, photoId, requestId) {
   if (cachePoller) clearInterval(cachePoller)
   cachePoller = setInterval(async () => {
     try {
-      const data = await getChapterCacheStatus(albumId, photoId)
+      const data = await api.getChapterCacheStatus(albumId, photoId)
       if (requestId !== chapterRequestId) return
       cacheStatus.value = data.status
       cacheProgress.value = data.progress || 0
@@ -100,7 +119,7 @@ function startPdfPolling(albumId, photoId, requestId) {
   if (pdfPoller) clearInterval(pdfPoller)
   pdfPoller = setInterval(async () => {
     try {
-      const data = await getChapterPdfStatus(albumId, photoId)
+      const data = await api.getChapterPdfStatus(albumId, photoId)
       if (requestId !== chapterRequestId) return
       pdfStatus.value = data.status
       pdfProgress.value = data.progress || 0
@@ -121,12 +140,12 @@ function startPdfPolling(albumId, photoId, requestId) {
 }
 
 function triggerPdfDownload(albumId, photoId) {
-  const a = document.createElement('a')
-  a.href = getChapterPdfDownloadUrl(albumId, photoId)
-  a.download = `JMComic_${photoId}.pdf`
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+  const anchor = document.createElement('a')
+  anchor.href = api.getChapterPdfDownloadUrl(albumId, photoId)
+  anchor.download = `JMComic_${photoId}.pdf`
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
 }
 
 function zoomIn() {
@@ -134,7 +153,10 @@ function zoomIn() {
 }
 function zoomOut() {
   zoom.value = Math.max(ZOOM_MIN, parseFloat((zoom.value - ZOOM_STEP).toFixed(2)))
-  if (zoom.value <= 1) { panX.value = 0; panY.value = 0 }
+  if (zoom.value <= 1) {
+    panX.value = 0
+    panY.value = 0
+  }
 }
 function resetZoom() {
   zoom.value = 1.0
@@ -142,14 +164,12 @@ function resetZoom() {
   panY.value = 0
 }
 
-// Ctrl + 滚轮缩放
 function handleWheel(e) {
   if (!e.ctrlKey && !e.metaKey) return
   e.preventDefault()
   e.deltaY < 0 ? zoomIn() : zoomOut()
 }
 
-// 翻页模式双击切换 2x / 1x
 function handleDoubleClick(e) {
   e.stopPropagation()
   if (zoom.value !== 1.0) {
@@ -159,20 +179,17 @@ function handleDoubleClick(e) {
   }
 }
 
-// 捏合缩放辅助
 function getTouchDist(touches) {
   const dx = touches[0].clientX - touches[1].clientX
   const dy = touches[0].clientY - touches[1].clientY
   return Math.sqrt(dx * dx + dy * dy)
 }
 
-// ---- 翻页模式：拖拽平移 + 捏合缩放 ----
 let pinchStartDist = 0
 let pinchStartZoom = 1
 
 function onPanStart(e) {
   if (e.touches && e.touches.length === 2) {
-    // 双指捏合开始
     pinchStartDist = getTouchDist(e.touches)
     pinchStartZoom = zoom.value
     e.preventDefault()
@@ -180,30 +197,32 @@ function onPanStart(e) {
   }
   if (zoom.value <= 1) return
   isPanning.value = true
-  const p = e.touches ? e.touches[0] : e
-  panStartX = p.clientX
-  panStartY = p.clientY
+  const point = e.touches ? e.touches[0] : e
+  panStartX = point.clientX
+  panStartY = point.clientY
   panOriginX = panX.value
   panOriginY = panY.value
   e.preventDefault()
 }
 function onPanMove(e) {
   if (e.touches && e.touches.length === 2) {
-    // 捏合缩放
     e.preventDefault()
     const dist = getTouchDist(e.touches)
     const scale = dist / pinchStartDist
     zoom.value = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN,
       parseFloat((pinchStartZoom * scale).toFixed(2))
     ))
-    if (zoom.value <= 1) { panX.value = 0; panY.value = 0 }
+    if (zoom.value <= 1) {
+      panX.value = 0
+      panY.value = 0
+    }
     return
   }
   if (!isPanning.value) return
   e.preventDefault()
-  const p = e.touches ? e.touches[0] : e
-  panX.value = panOriginX + (p.clientX - panStartX)
-  panY.value = panOriginY + (p.clientY - panStartY)
+  const point = e.touches ? e.touches[0] : e
+  panX.value = panOriginX + (point.clientX - panStartX)
+  panY.value = panOriginY + (point.clientY - panStartY)
 }
 function onPanEnd(e) {
   if (e?.touches?.length === 0 || !e?.touches) {
@@ -212,7 +231,6 @@ function onPanEnd(e) {
   }
 }
 
-// ---- 滚动模式：捏合缩放 ----
 let scrollPinchActive = false
 let scrollPinchStartDist = 0
 let scrollPinchStartZoom = 1
@@ -237,52 +255,250 @@ function onScrollTouchEnd(e) {
   if (e.touches.length < 2) scrollPinchActive = false
 }
 
-// 滚动模式下追踪当前页
+function clampPageIndex(index, total = totalPages.value) {
+  const safeIndex = Number.isFinite(index) ? Math.trunc(index) : 0
+  const maxIndex = total > 0 ? total - 1 : 0
+  return Math.min(Math.max(safeIndex, 0), Math.max(maxIndex, 0))
+}
+
 function updateCurrentPageFromScroll() {
-  if (!scrollContainerRef.value) return;
-  const container = scrollContainerRef.value;
-  const midPoint = container.scrollTop + container.clientHeight / 2;
-  let closest = 0;
-  let minDist = Infinity;
-  scrollPageRefs.value.forEach((el, i) => {
-    if (!el) return;
-    const center = el.offsetTop + el.offsetHeight / 2;
-    const dist = Math.abs(center - midPoint);
-    if (dist < minDist) {
-      minDist = dist;
-      closest = i;
+  if (!scrollContainerRef.value) return
+  const container = scrollContainerRef.value
+  const midPoint = container.scrollTop + container.clientHeight / 2
+  let closest = 0
+  let minDist = Infinity
+
+  scrollPageRefs.value.forEach((el, index) => {
+    if (!el) return
+    const center = el.offsetTop + el.offsetHeight / 2
+    const distance = Math.abs(center - midPoint)
+    if (distance < minDist) {
+      minDist = distance
+      closest = index
     }
-  });
-  currentPage.value = closest;
+  })
+
+  currentPage.value = closest
 }
 
 function handleScroll() {
-  if (scrollFrame) return;
+  if (scrollFrame) return
   scrollFrame = requestAnimationFrame(() => {
-    scrollFrame = null;
-    updateCurrentPageFromScroll();
-  });
+    scrollFrame = null
+    updateCurrentPageFromScroll()
+  })
 }
 
 const totalPages = computed(() => chapter.value?.images?.length || 0);
 const albumId = computed(() => chapter.value?.album_id || '')
 
 const episodeList = ref([])
+const albumTitle = ref('')
+const albumAuthor = ref('')
+const episodeListWithState = computed(() =>
+  mergeEpisodesWithReadingState(episodeList.value, readingState.value),
+)
 
 const currentEpisodeIndex = computed(() =>
-  episodeList.value.findIndex(ep => ep.id === props.photoId)
+  episodeListWithState.value.findIndex(ep => String(ep.id) === String(props.photoId))
+)
+const currentEpisodeMeta = computed(() =>
+  currentEpisodeIndex.value === -1 ? null : episodeListWithState.value[currentEpisodeIndex.value]
 )
 const prevEpisode = computed(() =>
-  currentEpisodeIndex.value > 0 ? episodeList.value[currentEpisodeIndex.value - 1] : null
+  currentEpisodeIndex.value > 0 ? episodeListWithState.value[currentEpisodeIndex.value - 1] : null
 )
 const nextEpisode = computed(() =>
-  currentEpisodeIndex.value !== -1 && currentEpisodeIndex.value < episodeList.value.length - 1
-    ? episodeList.value[currentEpisodeIndex.value + 1]
+  currentEpisodeIndex.value !== -1 && currentEpisodeIndex.value < episodeListWithState.value.length - 1
+    ? episodeListWithState.value[currentEpisodeIndex.value + 1]
     : null
 )
+const currentChapterReading = computed(() =>
+  readingState.value.chapterMap?.[props.photoId] || null,
+)
+const currentChapterBadge = computed(() => {
+  const progress = currentChapterReading.value
+  if (!progress) return ''
+  if (progress.isRead) return '已读'
+  if (progress.progress > 0) return `${progress.progress}%`
+  if (progress.visited) return '已看'
+  return ''
+})
 
 function epTitle(ep) {
   return ep?.title || `第${ep?.sort}话`
+}
+
+function getEpisodeStateLabel(ep) {
+  const progress = ep?.reading
+  if (!progress) return ''
+  if (ep.isLastRead && !progress.isRead) {
+    return progress.progress > 0 ? `继续 ${progress.progress}%` : '继续阅读'
+  }
+  return formatEpisodeProgress(progress)
+}
+
+function getEpisodeStateClass(ep) {
+  const progress = ep?.reading
+  if (!progress) return ''
+  if (ep.isLastRead && !progress.isRead) return 'ep-item-state--continue'
+  if (progress.isRead) return 'ep-item-state--read'
+  if (progress.progress > 0) return 'ep-item-state--progress'
+  return 'ep-item-state--visited'
+}
+
+const currentEpisodeTitle = computed(() => {
+  if (currentEpisodeMeta.value?.title) return currentEpisodeMeta.value.title
+  if (chapter.value?.title && chapter.value.title !== albumTitle.value) return chapter.value.title
+
+  const sort = currentEpisodeMeta.value?.sort || chapter.value?.album_index
+  return sort ? `第${sort}话` : `章节 ${props.photoId}`
+})
+
+const readerTitle = computed(() => {
+  const album = albumTitle.value || chapter.value?.title || ''
+  const episode = currentEpisodeTitle.value
+  if (album && episode && episode !== album) return `${album} · ${episode}`
+  return album || episode || '阅读中...'
+})
+
+function getEpisodeMetaById(photoId) {
+  return episodeListWithState.value.find((episode) => String(episode.id) === String(photoId)) || null
+}
+
+function getEpisodeTitleById(photoId) {
+  if (!photoId) return ''
+  const episode = getEpisodeMetaById(photoId)
+  if (episode) return epTitle(episode)
+  if (photoId === props.photoId) return currentEpisodeTitle.value
+  return `章节 ${photoId}`
+}
+
+function getEpisodeSortById(photoId) {
+  const episode = getEpisodeMetaById(photoId)
+  if (episode?.sort !== undefined && episode?.sort !== null) return episode.sort
+  if (photoId === props.photoId) return chapter.value?.album_index ?? null
+  return null
+}
+
+function applyReadingState(rawState, albumIdOverride = '') {
+  readingState.value = normalizeReadingState(rawState, albumIdOverride || chapter.value?.album_id || '')
+}
+
+function buildPersistContext({
+  photoId = props.photoId,
+  pageIndex = currentPage.value,
+} = {}) {
+  if (!chapter.value?.album_id) return null
+
+  return {
+    albumId: chapter.value.album_id,
+    photoId,
+    currentPageIndex: clampPageIndex(pageIndex, totalPages.value),
+    totalPages: totalPages.value,
+    comicTitle: albumTitle.value || chapter.value?.title || '',
+    chapterTitle: getEpisodeTitleById(photoId),
+    author: albumAuthor.value || chapter.value?.author || '',
+    sort: getEpisodeSortById(photoId),
+    mode: mode.value,
+  }
+}
+
+function applyLocalProgress(payload) {
+  if (!payload?.photo_id) return
+
+  const updatedAt = Date.now()
+  const chapterMap = { ...(readingState.value.chapterMap || {}) }
+  const existing = chapterMap[payload.photo_id] || {}
+
+  chapterMap[payload.photo_id] = {
+    ...existing,
+    albumId: payload.album_id,
+    photoId: payload.photo_id,
+    title: payload.chapter_title || existing.title || getEpisodeTitleById(payload.photo_id),
+    sort: payload.sort ?? existing.sort ?? getEpisodeSortById(payload.photo_id),
+    pageIndex: payload.page_index ?? existing.pageIndex ?? 0,
+    currentPage: payload.current_page ?? existing.currentPage ?? 0,
+    totalPages: payload.total_pages ?? existing.totalPages ?? 0,
+    progress: payload.progress ?? existing.progress ?? 0,
+    isRead: Boolean(payload.completed),
+    visited: true,
+    updatedAt,
+  }
+
+  readingState.value = {
+    ...readingState.value,
+    albumId: payload.album_id || readingState.value.albumId,
+    lastReadPhotoId: payload.photo_id,
+    lastReadPage: payload.current_page ?? readingState.value.lastReadPage,
+    lastReadPageIndex: payload.page_index ?? readingState.value.lastReadPageIndex,
+    progress: payload.progress ?? readingState.value.progress,
+    updatedAt,
+    chapterMap,
+    chapters: Object.values(chapterMap),
+  }
+}
+
+function queueReadingPersist() {
+  const context = buildPersistContext()
+  if (!context) return
+
+  const progressPayload = buildReadingProgressPayload(context)
+  const fingerprint = createPersistFingerprint(progressPayload)
+
+  applyLocalProgress(progressPayload)
+  pendingProgressPayload = progressPayload
+
+  if (fingerprint === lastPersistFingerprint && !persistTimer) return
+
+  clearPersistTimer()
+  persistTimer = setTimeout(() => {
+    void flushReadingPersist()
+  }, 800)
+}
+
+async function flushReadingPersist() {
+  clearPersistTimer()
+
+  const progressPayload = pendingProgressPayload
+  pendingProgressPayload = null
+
+  if (!progressPayload) return
+
+  const fingerprint = createPersistFingerprint(progressPayload)
+  if (progressPayload && fingerprint === lastPersistFingerprint) return
+
+  if (progressPayload) {
+    lastPersistFingerprint = fingerprint
+  }
+
+  const tasks = []
+  if (typeof api.saveReadingProgress === 'function') {
+    tasks.push(api.saveReadingProgress(progressPayload))
+  }
+
+  if (!tasks.length) return
+
+  try {
+    await Promise.allSettled(tasks)
+  } catch {
+  }
+}
+
+function getRestoredPageIndex() {
+  const progress = readingState.value.chapterMap?.[props.photoId]
+  if (!progress) return 0
+  return clampPageIndex(progress.pageIndex, totalPages.value)
+}
+
+function restoreScrollPosition() {
+  if (mode.value !== 'scroll' || !scrollContainerRef.value) return
+  const target = scrollPageRefs.value[currentPage.value]
+  if (!target) return
+  scrollContainerRef.value.scrollTo({
+    top: target.offsetTop,
+    behavior: 'auto',
+  })
 }
 
 function goToEpisode(ep) {
@@ -292,21 +508,22 @@ function goToEpisode(ep) {
 
 function getImageSrc(index) {
   if (viewMode.value === 'cache' && cacheStatus.value === 'ready') {
-    return getCachedImageUrl(albumId.value, props.photoId, index)
+    return api.getCachedImageUrl(albumId.value, props.photoId, index)
   }
-  return getChapterImageUrl(props.photoId, index);
+  return api.getChapterImageUrl(props.photoId, index);
 }
 
 async function fetchChapter() {
   const requestId = ++chapterRequestId;
+
   try {
     loading.value = true;
     error.value = null;
     loadingCancelled = false;
     resetZoom()
     imageLoader.clear();
-    lazyImageRefs.value = []; // 清空旧的 refs
-    scrollPageRefs.value = []; // 清空旧的 DOM 引用
+    lazyImageRefs.value = [];
+    scrollPageRefs.value = [];
     cacheStatus.value = null
     cacheProgress.value = 0
     pdfStatus.value = null
@@ -314,26 +531,37 @@ async function fetchChapter() {
     pdfPhase.value = ''
     pdfDownloadTriggered = false
     episodeList.value = []
+    albumTitle.value = ''
+    albumAuthor.value = ''
+    applyReadingState({})
     clearAsyncState()
 
-    chapter.value = await getChapterDetail(props.photoId);
+    chapter.value = await api.getChapterDetail(props.photoId);
     if (requestId !== chapterRequestId) return;
+    albumTitle.value = chapter.value?.title || ''
 
-    // 后台拉取本漫画章节列表（不 await，不影响加载速度）
     if (chapter.value.album_id) {
-      episodeList.value = [] // 重置，防止上一章节残留
-      getComicDetail(chapter.value.album_id)
-        .then(data => {
+      api.getComicDetail(chapter.value.album_id)
+        .then((data) => {
           if (requestId === chapterRequestId) {
+            albumTitle.value = data.title || albumTitle.value
+            albumAuthor.value = data.author || albumAuthor.value
             episodeList.value = data.episodes || []
           }
         })
         .catch(() => {})
+
+      if (typeof api.getReadingState === 'function') {
+        const rawState = await api.getReadingState(chapter.value.album_id).catch(() => null)
+        if (requestId !== chapterRequestId) return
+        if (rawState) {
+          applyReadingState(rawState, chapter.value.album_id)
+        }
+      }
     }
 
-    // 缓存模式处理
     if (viewMode.value === 'cache') {
-      const statusData = await getChapterCacheStatus(albumId.value, props.photoId)
+      const statusData = await api.getChapterCacheStatus(albumId.value, props.photoId)
       if (requestId !== chapterRequestId) return;
       if (statusData.status === 'ready') {
         cacheStatus.value = 'ready'
@@ -341,12 +569,12 @@ async function fetchChapter() {
       } else {
         cacheStatus.value = statusData.status === 'not_started' ? 'pending' : statusData.status
         cacheProgress.value = statusData.progress || 0
-        await startChapterCache(albumId.value, props.photoId)
+        await api.startChapterCache(albumId.value, props.photoId)
         if (requestId !== chapterRequestId) return;
         startCachePolling(albumId.value, props.photoId, requestId)
       }
     } else if (viewMode.value === 'pdf') {
-      const statusData = await getChapterPdfStatus(albumId.value, props.photoId)
+      const statusData = await api.getChapterPdfStatus(albumId.value, props.photoId)
       if (requestId !== chapterRequestId) return;
       if (statusData.status === 'ready') {
         pdfStatus.value = 'ready'
@@ -357,7 +585,7 @@ async function fetchChapter() {
         }
       } else {
         pdfStatus.value = 'caching'
-        await startChapterPdf(albumId.value, props.photoId)
+        await api.startChapterPdf(albumId.value, props.photoId)
         if (requestId !== chapterRequestId) return;
         startPdfPolling(albumId.value, props.photoId, requestId)
       }
@@ -365,18 +593,18 @@ async function fetchChapter() {
       cacheStatus.value = 'ready'
     }
 
-    currentPage.value = 0;
+    currentPage.value = getRestoredPageIndex();
 
-    // 等待 DOM 更新后开始顺序加载
     await nextTick();
     if (requestId !== chapterRequestId) return;
 
-    // 再次等待，确保所有 refs 都已设置
     await nextTick();
+    if (requestId !== chapterRequestId) return;
 
-    // 在滚动模式下启动顺序加载
     if (mode.value === "scroll") {
-      // 添加一个小延迟，确保 refs 完全就绪
+      if (currentPage.value > 0) {
+        restoreScrollPosition()
+      }
       sequentialStartTimer = setTimeout(() => {
         sequentialStartTimer = null;
         if (requestId === chapterRequestId) {
@@ -384,6 +612,8 @@ async function fetchChapter() {
         }
       }, 100);
     }
+
+    queueReadingPersist()
   } catch (e) {
     if (requestId !== chapterRequestId) return;
     error.value = "加载失败: " + (e.response?.data?.detail || e.message);
@@ -394,64 +624,53 @@ async function fetchChapter() {
   }
 }
 
-// 顺序加载图片 - 纯并发槽控制，无延迟
 function startSequentialLoading() {
   const images = chapter.value?.images || [];
   if (!images.length || lazyImageRefs.value.length === 0) return;
 
   loadingCancelled = false;
   let nextIndex = 0;
-  let completed = 0;
   const total = images.length;
 
   function tryLoadNext() {
     if (loadingCancelled || nextIndex >= total) return;
     const i = nextIndex++;
-    const ref = lazyImageRefs.value[i];
+    const imageRef = lazyImageRefs.value[i];
 
     function onDone() {
       if (loadingCancelled) return;
-      completed++;
       tryLoadNext();
     }
 
-    if (!ref || ref.isLoaded) {
+    if (!imageRef || imageRef.isLoaded) {
       onDone();
       return;
     }
-    ref.loadImage().then(onDone).catch(onDone);
+    imageRef.loadImage().then(onDone).catch(onDone);
   }
 
   const concurrency = Math.min(LOADING_CONFIG.maxConcurrent, total);
   for (let i = 0; i < concurrency; i++) tryLoadNext();
 }
 
-// 取消顺序加载
 function cancelSequentialLoading() {
   loadingCancelled = true;
 }
 
-// 处理图片可见事件（懒加载触发）
 function handleImageVisible(index) {
-  // 当图片进入视口时，从该位置开始顺序加载
-  const ref = lazyImageRefs.value[index];
-  if (ref && !ref.isLoaded && !ref.isLoading) {
-    ref.loadImage();
+  const imageRef = lazyImageRefs.value[index];
+  if (imageRef && !imageRef.isLoaded && !imageRef.isLoading) {
+    imageRef.loadImage();
   }
 }
 
-// 预加载翻页模式的图片
 function preloadPageImages() {
   if (mode.value !== "page") return;
 
-  const indexes = [];
-  // 当前页
-  indexes.push(currentPage.value);
-  // 下一页
+  const indexes = [currentPage.value];
   if (currentPage.value < totalPages.value - 1) {
     indexes.push(currentPage.value + 1);
   }
-  // 上一页
   if (currentPage.value > 0) {
     indexes.push(currentPage.value - 1);
   }
@@ -512,26 +731,46 @@ function handleKeydown(e) {
   if (e.key === '0') resetZoom()
 }
 
-watch(() => props.photoId, fetchChapter);
+watch(() => props.photoId, (newId, oldId) => {
+  if (oldId && oldId !== newId) {
+    void flushReadingPersist()
+  }
+  fetchChapter()
+});
 
-// 监听模式切换
 watch(mode, (newMode) => {
   if (newMode === "page") {
-    // 切换到翻页模式，取消顺序加载
     cancelSequentialLoading();
     preloadPageImages();
   } else if (newMode === "scroll") {
-    // 切换到滚动模式，重新启动顺序加载
     startSequentialLoading();
+    nextTick(() => {
+      restoreScrollPosition()
+    })
   }
 });
 
-// 监听翻页，预加载相邻页面
-watch(currentPage, () => {
+watch(currentPage, (newPage, oldPage) => {
   if (mode.value === "page") {
     preloadPageImages();
   }
+
+  if (!loading.value && chapter.value && newPage !== oldPage) {
+    queueReadingPersist()
+  }
 });
+
+watch([loading, error, readerTitle], ([isLoading, currentError, title]) => {
+  if (isLoading) {
+    setDocumentTitle('阅读中')
+    return
+  }
+  if (currentError) {
+    setDocumentTitle('章节加载失败')
+    return
+  }
+  setDocumentTitle(title || '阅读中')
+}, { immediate: true })
 
 onMounted(() => {
   fetchChapter();
@@ -542,7 +781,9 @@ onUnmounted(() => {
   document.removeEventListener("keydown", handleKeydown);
   cancelSequentialLoading();
   clearAsyncState();
+  void flushReadingPersist();
   imageLoader.clear();
+  resetDocumentTitle()
 });
 </script>
 
@@ -563,7 +804,8 @@ onUnmounted(() => {
             <path d="M19 12H5M12 19l-7-7 7-7" />
           </svg>
         </button>
-        <span class="toolbar-title">{{ chapter?.title || "阅读中..." }}</span>
+        <span class="toolbar-title" :title="readerTitle">{{ readerTitle }}</span>
+        <span v-if="currentChapterBadge" class="toolbar-progress">{{ currentChapterBadge }}</span>
         <div class="mode-switch">
           <button
             :class="['mode-btn', { active: mode === 'scroll' }]"
@@ -603,7 +845,7 @@ onUnmounted(() => {
       <div v-if="showEpisodeList" class="episode-drawer" @click.stop>
         <div class="drawer-header">
           <span class="drawer-title">目录</span>
-          <span class="drawer-count" v-if="episodeList.length">{{ episodeList.length }} 话</span>
+          <span class="drawer-count" v-if="episodeListWithState.length">{{ episodeListWithState.length }} 话</span>
           <button class="drawer-close" @click="showEpisodeList = false" aria-label="关闭">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
@@ -611,19 +853,27 @@ onUnmounted(() => {
           </button>
         </div>
         <div class="drawer-list" ref="episodeListRef">
-          <div v-if="!episodeList.length" class="drawer-empty">
+          <div v-if="!episodeListWithState.length" class="drawer-empty">
             <div class="drawer-spinner"></div>
             目录加载中…
           </div>
           <button
-            v-for="ep in episodeList"
+            v-for="ep in episodeListWithState"
             :key="ep.id"
-            :class="['ep-item', { active: ep.id === photoId }]"
+            :class="['ep-item', { active: String(ep.id) === String(photoId) }]"
             @click="goToEpisode(ep); showEpisodeList = false"
           >
-            <span class="ep-item-indicator" v-if="ep.id === photoId"></span>
-            <span class="ep-item-title">{{ epTitle(ep) }}</span>
-            <svg v-if="ep.id === photoId" class="ep-item-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <span class="ep-item-indicator" v-if="String(ep.id) === String(photoId)"></span>
+            <span class="ep-item-main">
+              <span class="ep-item-title">{{ epTitle(ep) }}</span>
+              <span
+                v-if="getEpisodeStateLabel(ep)"
+                :class="['ep-item-state', getEpisodeStateClass(ep)]"
+              >
+                {{ getEpisodeStateLabel(ep) }}
+              </span>
+            </span>
+            <svg v-if="String(ep.id) === String(photoId)" class="ep-item-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="20 6 9 17 4 12"/>
             </svg>
           </button>
@@ -696,7 +946,7 @@ onUnmounted(() => {
         </svg>
         <p class="cache-text" style="color: rgba(255,255,255,0.9)">PDF 已生成，正在下载</p>
         <a
-          :href="getChapterPdfDownloadUrl(albumId, photoId)"
+          :href="api.getChapterPdfDownloadUrl(albumId, photoId)"
           :download="`JMComic_${photoId}.pdf`"
           class="pdf-manual-link"
         >如未自动下载，点此下载</a>
@@ -915,6 +1165,16 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.toolbar-progress {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .mode-switch {
@@ -1416,13 +1676,51 @@ onUnmounted(() => {
 }
 
 .ep-item-title {
-  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .ep-item.active .ep-item-title {
   font-weight: 500;
+}
+
+.ep-item-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.ep-item-state {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ep-item-state--continue {
+  color: var(--color-primary);
+  background: rgba(59, 130, 246, 0.16);
+}
+
+.ep-item-state--read {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.16);
+}
+
+.ep-item-state--progress {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.16);
+}
+
+.ep-item-state--visited {
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .ep-item-check {

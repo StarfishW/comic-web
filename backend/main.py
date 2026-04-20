@@ -16,10 +16,10 @@ import shutil
 import zipfile
 import math
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Query, Response, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, Response, BackgroundTasks, Depends, Header
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import jmcomic
 from jmcomic import (
@@ -27,6 +27,7 @@ from jmcomic import (
     JmcomicText,
     JmImageTool,
 )
+import site_store
 
 # ---------------------------------------------------------------------------
 # Global jmcomic client (created once at startup)
@@ -75,6 +76,8 @@ def get_client():
 async def lifespan(app: FastAPI):
     # Startup: warm up the client
     try:
+        site_store.init_site_storage()
+        print("[backend] site storage initialized")
         get_client()
         print("[backend] jmcomic client initialized")
     except Exception as e:
@@ -473,20 +476,53 @@ def chapter_image(photo_id: str, index: int):
 
 # ---- User / Auth ----
 
-# Simple password protection - override with SITE_PASSWORD in the environment for deployment.
-SITE_PASSWORD = os.getenv("SITE_PASSWORD", "wyq678")
-
 class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64)
     password: str
 
 
 @app.post("/api/auth/login")
 def login(body: LoginRequest):
-    """Simple password verification for site access."""
-    if body.password == SITE_PASSWORD:
-        return {"ok": True, "message": "Login successful", "token": "authenticated"}
-    else:
-        raise HTTPException(401, "密码错误")
+    result = site_store.authenticate_user(body.username, body.password)
+    if not result:
+        raise HTTPException(401, "登录失败")
+    return {"ok": True, **result}
+
+
+@app.post("/api/auth/logout")
+def logout(
+    _: dict = Depends(site_store.require_current_user),
+    authorization: Optional[str] = Header(None),
+):
+    token = site_store.extract_token(authorization)
+    if token:
+        site_store.delete_session(token)
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(current_user: dict = Depends(site_store.require_current_user)):
+    return {"user": current_user}
+
+
+class CreateUserRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64)
+    password: str = Field(..., min_length=6, max_length=128)
+    is_admin: bool = False
+
+
+@app.get("/api/admin/users")
+def admin_users(_: dict = Depends(site_store.require_admin_user)):
+    return {"items": site_store.list_users()}
+
+
+@app.post("/api/admin/users")
+def admin_create_user(
+    body: CreateUserRequest,
+    _: dict = Depends(site_store.require_admin_user),
+):
+    user = site_store.create_user(body.username, body.password, body.is_admin)
+    return {"ok": True, "user": user}
 
 
 # ---- Favorites ----
@@ -494,40 +530,153 @@ def login(body: LoginRequest):
 @app.get("/api/favorites")
 def favorites(
     page: int = Query(1, ge=1),
+    page_size: int = Query(24, ge=1, le=100),
     folder_id: str = Query("0"),
     order_by: str = Query("mr"),
+    current_user: dict = Depends(site_store.require_current_user),
 ):
-    """Get user favorite albums."""
-    try:
-        cl = get_client()
-        result = cl.favorite_folder(page=page, folder_id=folder_id, order_by=order_by)
-        data = page_content_to_dict(result)
-        # Add folder list
-        folders = []
-        for fid, fname in result.iter_folder_id_name():
-            folders.append({"id": fid, "name": fname})
-        data["folders"] = folders
-        return data
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(500, str(e))
+    data = site_store.list_favorites(current_user["id"], page, page_size)
+    data["folders"] = []
+    return data
 
 
 class FavoriteRequest(BaseModel):
     album_id: str
     folder_id: str = "0"
+    title: str = ""
+    author: str = ""
+    cover: str = ""
+
+
+@app.get("/api/favorites/{album_id}/status")
+def favorite_status(
+    album_id: str,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    return site_store.get_favorite_status(current_user["id"], album_id)
 
 
 @app.post("/api/favorites")
-def add_favorite(body: FavoriteRequest):
-    """Add album to favorites."""
-    try:
-        cl = get_client()
-        cl.add_favorite_album(body.album_id, body.folder_id)
-        return {"ok": True}
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(500, str(e))
+def add_favorite(
+    body: FavoriteRequest,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    item = site_store.add_favorite(
+        current_user["id"],
+        body.album_id,
+        title=body.title,
+        author=body.author,
+        cover=body.cover,
+    )
+    return {"ok": True, "item": item}
+
+
+@app.delete("/api/favorites/{album_id}")
+def delete_favorite(
+    album_id: str,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    removed = site_store.remove_favorite(current_user["id"], album_id)
+    if not removed:
+        raise HTTPException(404, "收藏不存在")
+    return {"ok": True}
+
+
+# ---- History / Reading ----
+
+class HistoryRequest(BaseModel):
+    album_id: str
+    title: str = ""
+    album_title: str = ""
+    comic_title: str = ""
+    author: str = ""
+    cover: str = ""
+
+
+class ReadingProgressRequest(BaseModel):
+    album_id: str
+    photo_id: str
+    album_title: str = ""
+    comic_title: str = ""
+    album_author: str = ""
+    author: str = ""
+    cover: str = ""
+    chapter_title: str = ""
+    chapter_sort: Optional[int] = None
+    sort: Optional[int] = None
+    page_index: Optional[int] = Field(None, ge=0)
+    current_page: Optional[int] = Field(None, ge=0)
+    page: Optional[int] = Field(None, ge=0)
+    last_page: int = Field(0, ge=0)
+    total_pages: int = Field(0, ge=0)
+
+
+@app.get("/api/history")
+def get_history(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(24, ge=1, le=100),
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    return site_store.list_history(current_user["id"], page, page_size)
+
+
+@app.post("/api/history")
+def upsert_history(
+    body: HistoryRequest,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    item = site_store.upsert_history(
+        current_user["id"],
+        body.album_id,
+        title=body.title or body.album_title or body.comic_title,
+        author=body.author,
+        cover=body.cover,
+    )
+    return {"ok": True, "item": item}
+
+
+@app.delete("/api/history")
+def delete_all_history(current_user: dict = Depends(site_store.require_current_user)):
+    return site_store.clear_history(current_user["id"])
+
+
+@app.delete("/api/history/{album_id}")
+def delete_history_item(
+    album_id: str,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    removed = site_store.remove_history(current_user["id"], album_id)
+    if not removed:
+        raise HTTPException(404, "历史记录不存在")
+    return {"ok": True}
+
+
+@app.get("/api/reading/{album_id}")
+def get_reading_state(
+    album_id: str,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    return site_store.get_reading_state(current_user["id"], album_id)
+
+
+@app.post("/api/reading/progress")
+def save_reading_progress(
+    body: ReadingProgressRequest,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    item = site_store.save_reading_progress(
+        current_user["id"],
+        body.album_id,
+        body.photo_id,
+        album_title=body.album_title or body.comic_title,
+        album_author=body.album_author or body.author,
+        cover=body.cover,
+        chapter_title=body.chapter_title,
+        chapter_sort=body.chapter_sort if body.chapter_sort is not None else body.sort,
+        last_page=body.last_page or body.current_page or body.page or ((body.page_index + 1) if body.page_index is not None else 0),
+        total_pages=body.total_pages,
+    )
+    return {"ok": True, "item": item}
 
 
 # ---- Comment ----

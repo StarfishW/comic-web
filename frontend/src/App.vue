@@ -1,8 +1,14 @@
 <script setup>
+import { onMounted } from 'vue'
 import AppHeader from './components/AppHeader.vue'
+import { initAuth } from './utils/auth'
 import './utils/theme.js'
 
 const cachedViews = ['HomeView', 'SearchView', 'RankingView', 'FavoritesView']
+
+onMounted(() => {
+  initAuth()
+})
 </script>
 
 <template>

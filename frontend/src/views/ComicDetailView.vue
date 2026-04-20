@@ -1,8 +1,9 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { getCoverUrl, getComicDetail, addFavorite, startChapterCache, getChapterCacheStatus, getAlbumCacheStatus } from '../api'
-import { addHistory } from '../utils/history'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import * as api from '../api'
 import { registerMeta, startPolling as startGlobalPolling } from '../utils/cacheQueue'
+import { setDocumentTitle, resetDocumentTitle } from '../utils/documentTitle'
+import { formatEpisodeProgress, mergeEpisodesWithReadingState, normalizeReadingState } from '../utils/reading'
 import LazyImage from '../components/LazyImage.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
@@ -11,47 +12,181 @@ const comic = ref(null)
 const loading = ref(true)
 const error = ref(null)
 const favoriteLoading = ref(false)
+const readingStateLoading = ref(false)
+const readingState = ref(normalizeReadingState({}, props.id))
 
-// 缓存管理
-const cacheMode = ref(false)           // 是否处于缓存选择模式
-const selectedIds = ref(new Set())     // 选中的 episode id 集合
-const cacheStatusMap = ref({})         // { [photoId]: { status, progress } }
+const cacheMode = ref(false)
+const selectedIds = ref(new Set())
+const cacheStatusMap = ref({})
 const cacheAllLoading = ref(false)
 let cachePoller = null
+
+const authorList = computed(() => {
+  const authors = Array.isArray(comic.value?.authors)
+    ? comic.value.authors.filter(Boolean)
+    : [comic.value?.author].filter(Boolean)
+
+  return authors
+})
+
+const episodesWithState = computed(() =>
+  mergeEpisodesWithReadingState(comic.value?.episodes || [], readingState.value),
+)
+
+const latestReadEpisode = computed(() =>
+  episodesWithState.value.find((episode) => episode.isLastRead) || null,
+)
+
+const primaryEpisode = computed(() =>
+  latestReadEpisode.value || episodesWithState.value[0] || null,
+)
+
+const primaryActionText = computed(() =>
+  latestReadEpisode.value ? '继续阅读' : '开始阅读',
+)
+
+const favoriteText = computed(() => {
+  if (favoriteLoading.value) return '处理中...'
+  return readingState.value.isFavorite ? '已收藏' : '收藏'
+})
+
+const readingStats = computed(() => {
+  const episodes = episodesWithState.value
+  const readCount = episodes.filter((episode) => episode.reading?.isRead).length
+  const inProgressCount = episodes.filter((episode) => {
+    const progress = episode.reading
+    return progress && !progress.isRead && progress.progress > 0
+  }).length
+  const visitedCount = episodes.filter((episode) => episode.reading?.visited).length
+
+  return {
+    total: episodes.length,
+    readCount,
+    inProgressCount,
+    visitedCount,
+  }
+})
+
+const readingSummary = computed(() => {
+  if (latestReadEpisode.value) {
+    const progress = latestReadEpisode.value.reading
+    const suffix = progress && !progress.isRead && progress.progress > 0
+      ? ` · ${progress.progress}%`
+      : ''
+    return `最近读到 ${getEpisodeTitle(latestReadEpisode.value)}${suffix}`
+  }
+
+  if (readingStats.value.readCount > 0) {
+    return `已读 ${readingStats.value.readCount}/${readingStats.value.total} 话`
+  }
+
+  if (readingStats.value.inProgressCount > 0 || readingStats.value.visitedCount > 0) {
+    return `已打开 ${readingStats.value.visitedCount || readingStats.value.inProgressCount} 话`
+  }
+
+  return ''
+})
 
 const cacheAllStats = computed(() => {
   const episodes = comic.value?.episodes || []
   const total = episodes.length
-  const readyCount = episodes.filter(ep => cacheStatusMap.value[ep.id]?.status === 'ready').length
-  const pendingCache = episodes.filter(ep => {
-    const s = cacheStatusMap.value[ep.id]?.status
-    return !s || s === 'not_started' || s === 'error'
+  const readyCount = episodes.filter((episode) => cacheStatusMap.value[episode.id]?.status === 'ready').length
+  const pendingCache = episodes.filter((episode) => {
+    const status = cacheStatusMap.value[episode.id]?.status
+    return !status || status === 'not_started' || status === 'error'
   })
+
   return { total, readyCount, pendingCache }
 })
 
+function getEpisodeTitle(episode) {
+  return episode?.title || `第${episode?.sort}话`
+}
+
+function getEpisodeReadingLabel(episode) {
+  const progress = episode?.reading
+  if (!progress) return ''
+  if (episode.isLastRead && !progress.isRead) {
+    return progress.progress > 0 ? `继续 ${progress.progress}%` : '继续阅读'
+  }
+  return formatEpisodeProgress(progress)
+}
+
+function getEpisodeReadingClass(episode) {
+  const progress = episode?.reading
+  if (!progress) return ''
+  if (episode.isLastRead && !progress.isRead) return 'ep-reading-tag--continue'
+  if (progress.isRead) return 'ep-reading-tag--read'
+  if (progress.progress > 0) return 'ep-reading-tag--progress'
+  return 'ep-reading-tag--visited'
+}
+
+function applyReadingState(rawState) {
+  readingState.value = normalizeReadingState(rawState, props.id)
+}
+
 async function fetchComic() {
+  const nextId = props.id
+
   try {
     loading.value = true
     error.value = null
-    comic.value = await getComicDetail(props.id)
-    addHistory({ id: props.id, title: comic.value.title, author: comic.value.author || '' })
+    comic.value = null
+    cacheMode.value = false
+    selectedIds.value = new Set()
+    cacheStatusMap.value = {}
+    applyReadingState({})
+    readingStateLoading.value = typeof api.getReadingState === 'function'
+
+    const [comicData, rawState] = await Promise.all([
+      api.getComicDetail(nextId),
+      typeof api.getReadingState === 'function'
+        ? api.getReadingState(nextId).catch(() => null)
+        : Promise.resolve(null),
+    ])
+
+    comic.value = comicData
+
+    if (rawState) {
+      applyReadingState(rawState)
+    }
+
     loadCacheStatus()
   } catch (e) {
     error.value = '加载失败: ' + (e.response?.data?.detail || e.message)
   } finally {
     loading.value = false
+    readingStateLoading.value = false
   }
 }
 
 async function handleFavorite() {
-  if (favoriteLoading.value) return
+  if (favoriteLoading.value || !comic.value) return
+
+  const willFavorite = !readingState.value.isFavorite
+  const action = willFavorite ? api.addFavorite : api.removeFavorite
+
+  if (typeof action !== 'function') return
+
+  favoriteLoading.value = true
+
   try {
-    favoriteLoading.value = true
-    await addFavorite(props.id)
-    alert('收藏成功')
+    if (willFavorite) {
+      await action(props.id, {
+        title: comic.value.title || '',
+        author: comic.value.author || authorList.value[0] || '',
+        cover: api.getCoverUrl(props.id),
+      })
+    } else {
+      await action(props.id)
+    }
+
+    readingState.value = {
+      ...readingState.value,
+      isFavorite: willFavorite,
+    }
   } catch {
-    alert('收藏失败，请先登录')
+    alert(willFavorite ? '收藏失败，请先登录' : '取消收藏失败，请稍后重试')
   } finally {
     favoriteLoading.value = false
   }
@@ -65,13 +200,14 @@ function toggleCacheMode() {
 }
 
 function toggleSelect(id) {
-  const s = new Set(selectedIds.value)
-  s.has(id) ? s.delete(id) : s.add(id)
-  selectedIds.value = s
+  const nextValue = new Set(selectedIds.value)
+  if (nextValue.has(id)) nextValue.delete(id)
+  else nextValue.add(id)
+  selectedIds.value = nextValue
 }
 
 function selectAll() {
-  selectedIds.value = new Set((comic.value?.episodes || []).map(ep => ep.id))
+  selectedIds.value = new Set((comic.value?.episodes || []).map((episode) => episode.id))
 }
 
 function clearSelect() {
@@ -80,73 +216,76 @@ function clearSelect() {
 
 async function startCaching() {
   if (!selectedIds.value.size) return
+
   const albumId = props.id
   const ids = [...selectedIds.value]
-
-  // 注册元数据供顶部缓存队列面板显示
   const albumTitle = comic.value?.title || props.id
-  ids.forEach(id => {
-    const ep = comic.value?.episodes?.find(e => e.id === id)
+
+  ids.forEach((id) => {
+    const episode = comic.value?.episodes?.find((item) => item.id === id)
     registerMeta(id, {
       albumId: props.id,
       albumTitle,
-      chapterTitle: ep ? (ep.title || `第${ep.sort}话`) : id,
+      chapterTitle: episode ? getEpisodeTitle(episode) : id,
     })
   })
 
-  // 初始化状态
-  const map = { ...cacheStatusMap.value }
-  ids.forEach(id => { map[id] = { status: 'pending', progress: 0 } })
-  cacheStatusMap.value = map
+  const nextMap = { ...cacheStatusMap.value }
+  ids.forEach((id) => {
+    nextMap[id] = { status: 'pending', progress: 0 }
+  })
+  cacheStatusMap.value = nextMap
 
-  // 并发触发（限制并发为 3）
   const chunks = []
-  for (let i = 0; i < ids.length; i += 3) chunks.push(ids.slice(i, i + 3))
+  for (let index = 0; index < ids.length; index += 3) {
+    chunks.push(ids.slice(index, index + 3))
+  }
+
   for (const chunk of chunks) {
-    await Promise.allSettled(chunk.map(id => {
-      const ep = comic.value?.episodes?.find(e => e.id === id)
-      return startChapterCache(albumId, id, {
+    await Promise.allSettled(chunk.map((id) => {
+      const episode = comic.value?.episodes?.find((item) => item.id === id)
+      return api.startChapterCache(albumId, id, {
         album_title: comic.value?.title || '',
         author: comic.value?.author || '',
-        chapter_title: ep ? (ep.title || `第${ep.sort}话`) : '',
+        chapter_title: episode ? getEpisodeTitle(episode) : '',
       })
     }))
   }
 
-  // 退出选择模式，开始轮询
   cacheMode.value = false
   selectedIds.value = new Set()
   startPolling(albumId)
-  startGlobalPolling() // 触发全局队列面板轮询（无参数，来自 cacheQueue.js）
+  startGlobalPolling()
 }
 
 async function loadCacheStatus() {
   try {
-    const data = await getAlbumCacheStatus(props.id)
-    // data 格式：{ [photoId]: { status, progress } }
-    // 只保留有实际状态的章节（not_started 不会出现在结果中）
-    const map = {}
-    Object.entries(data).forEach(([photoId, info]) => {
-      map[photoId] = { status: info.status, progress: info.progress }
-    })
-    // 合并：不覆盖本次会话已有的更新状态
-    cacheStatusMap.value = { ...map, ...cacheStatusMap.value }
+    const data = await api.getAlbumCacheStatus(props.id)
+    const nextMap = {}
 
-    // 如果有正在进行中的任务，启动轮询
-    const hasActive = Object.values(cacheStatusMap.value).some(
-      v => v.status === 'pending' || v.status === 'downloading'
+    Object.entries(data || {}).forEach(([photoId, info]) => {
+      nextMap[photoId] = { status: info.status, progress: info.progress }
+    })
+
+    cacheStatusMap.value = { ...nextMap, ...cacheStatusMap.value }
+
+    const hasActiveTask = Object.values(cacheStatusMap.value).some((status) =>
+      status.status === 'pending' || status.status === 'downloading',
     )
-    if (hasActive) startPolling(props.id)
+
+    if (hasActiveTask) {
+      startPolling(props.id)
+    }
   } catch {
-    // 静默失败，不影响页面正常显示
   }
 }
 
 function startPolling(albumId) {
   if (cachePoller) clearInterval(cachePoller)
+
   cachePoller = setInterval(async () => {
     const pendingIds = Object.entries(cacheStatusMap.value)
-      .filter(([, v]) => v.status === 'pending' || v.status === 'downloading')
+      .filter(([, value]) => value.status === 'pending' || value.status === 'downloading')
       .map(([id]) => id)
 
     if (!pendingIds.length) {
@@ -156,68 +295,97 @@ function startPolling(albumId) {
     }
 
     const results = await Promise.allSettled(
-      pendingIds.map(id => getChapterCacheStatus(albumId, id))
+      pendingIds.map((id) => api.getChapterCacheStatus(albumId, id)),
     )
-    const map = { ...cacheStatusMap.value }
-    results.forEach((r, i) => {
-      if (r.status === 'fulfilled') {
-        map[pendingIds[i]] = { status: r.value.status, progress: r.value.progress }
+    const nextMap = { ...cacheStatusMap.value }
+
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        nextMap[pendingIds[index]] = {
+          status: result.value.status,
+          progress: result.value.progress,
+        }
       }
     })
-    cacheStatusMap.value = map
+
+    cacheStatusMap.value = nextMap
   }, 2000)
 }
 
 async function cacheAll() {
   if (cacheAllLoading.value) return
+
   const { pendingCache } = cacheAllStats.value
   if (!pendingCache.length) return
 
   cacheAllLoading.value = true
-  const albumId = props.id
-  const albumTitle = comic.value?.title || props.id
 
-  pendingCache.forEach(ep => {
-    registerMeta(ep.id, {
-      albumId,
-      albumTitle,
-      chapterTitle: ep.title || `第${ep.sort}话`,
-    })
-  })
+  try {
+    const albumId = props.id
+    const albumTitle = comic.value?.title || props.id
 
-  const map = { ...cacheStatusMap.value }
-  pendingCache.forEach(ep => { map[ep.id] = { status: 'pending', progress: 0 } })
-  cacheStatusMap.value = map
-
-  const ids = pendingCache.map(ep => ep.id)
-  const chunks = []
-  for (let i = 0; i < ids.length; i += 3) chunks.push(ids.slice(i, i + 3))
-  for (const chunk of chunks) {
-    await Promise.allSettled(chunk.map(id => {
-      const ep = comic.value?.episodes?.find(e => e.id === id)
-      return startChapterCache(albumId, id, {
-        album_title: comic.value?.title || '',
-        author: comic.value?.author || '',
-        chapter_title: ep ? (ep.title || `第${ep.sort}话`) : '',
+    pendingCache.forEach((episode) => {
+      registerMeta(episode.id, {
+        albumId,
+        albumTitle,
+        chapterTitle: getEpisodeTitle(episode),
       })
-    }))
-  }
+    })
 
-  cacheAllLoading.value = false
-  startPolling(albumId)
-  startGlobalPolling()
+    const nextMap = { ...cacheStatusMap.value }
+    pendingCache.forEach((episode) => {
+      nextMap[episode.id] = { status: 'pending', progress: 0 }
+    })
+    cacheStatusMap.value = nextMap
+
+    const ids = pendingCache.map((episode) => episode.id)
+    const chunks = []
+    for (let index = 0; index < ids.length; index += 3) {
+      chunks.push(ids.slice(index, index + 3))
+    }
+
+    for (const chunk of chunks) {
+      await Promise.allSettled(chunk.map((id) => {
+        const episode = comic.value?.episodes?.find((item) => item.id === id)
+        return api.startChapterCache(albumId, id, {
+          album_title: comic.value?.title || '',
+          author: comic.value?.author || '',
+          chapter_title: episode ? getEpisodeTitle(episode) : '',
+        })
+      }))
+    }
+
+    startPolling(albumId)
+    startGlobalPolling()
+  } finally {
+    cacheAllLoading.value = false
+  }
 }
 
-onUnmounted(() => { if (cachePoller) clearInterval(cachePoller) })
+onUnmounted(() => {
+  if (cachePoller) clearInterval(cachePoller)
+})
+
+watch([loading, error, () => comic.value?.title], ([isLoading, currentError, title]) => {
+  if (isLoading) {
+    setDocumentTitle('漫画详情')
+    return
+  }
+  if (currentError) {
+    setDocumentTitle('漫画加载失败')
+    return
+  }
+  setDocumentTitle(title || '漫画详情')
+}, { immediate: true })
 
 watch(() => props.id, fetchComic)
 onMounted(fetchComic)
+onUnmounted(resetDocumentTitle)
 </script>
 
 <template>
   <div class="detail-view">
     <div class="container">
-      <!-- Loading skeleton -->
       <div v-if="loading" class="skeleton-detail">
         <div class="skeleton-cover shimmer"></div>
         <div class="skeleton-info">
@@ -227,63 +395,92 @@ onMounted(fetchComic)
         </div>
       </div>
 
-      <!-- Error -->
       <div v-else-if="error" class="error-state">
         <p>{{ error }}</p>
         <button class="retry-btn" @click="fetchComic">重试</button>
       </div>
 
-      <!-- Content -->
       <template v-else-if="comic">
         <div class="detail-header">
           <div class="cover-box">
-            <LazyImage :src="getCoverUrl(comic.id)" :alt="comic.title" class="cover-img" />
+            <LazyImage :src="api.getCoverUrl(comic.id)" :alt="comic.title" class="cover-img" />
           </div>
+
           <div class="meta-box">
             <h1 class="comic-title">{{ comic.title }}</h1>
-            <div class="meta-row">
+
+            <div v-if="authorList.length" class="meta-row">
               <span class="meta-label">作者</span>
               <router-link
-                v-for="a in (comic.authors || [comic.author])"
-                :key="a"
-                :to="{ name: 'Search', query: { q: a, main_tag: 2 } }"
+                v-for="author in authorList"
+                :key="author"
+                :to="{ name: 'Search', query: { q: author, main_tag: 2 } }"
                 class="meta-link"
-              >{{ a }}</router-link>
+              >
+                {{ author }}
+              </router-link>
             </div>
+
             <div v-if="comic.tags && comic.tags.length" class="meta-row">
               <span class="meta-label">标签</span>
               <div class="tag-list">
                 <router-link
-                  v-for="t in comic.tags"
-                  :key="t"
-                  :to="{ name: 'Search', query: { q: t, main_tag: 3 } }"
+                  v-for="tag in comic.tags"
+                  :key="tag"
+                  :to="{ name: 'Search', query: { q: tag, main_tag: 3 } }"
                   class="tag"
-                >{{ t }}</router-link>
+                >
+                  {{ tag }}
+                </router-link>
               </div>
             </div>
+
             <div class="stats">
               <span v-if="comic.views">浏览 {{ comic.views }}</span>
               <span v-if="comic.likes">喜欢 {{ comic.likes }}</span>
               <span v-if="comic.page_count">{{ comic.page_count }} 页</span>
             </div>
+
             <p v-if="comic.description" class="description">{{ comic.description }}</p>
+
             <div class="actions">
               <router-link
-                v-if="comic.episodes && comic.episodes.length"
-                :to="{ name: 'Reader', params: { photoId: comic.episodes[0].id } }"
+                v-if="primaryEpisode"
+                :to="{ name: 'Reader', params: { photoId: primaryEpisode.id } }"
                 class="btn-primary"
-              >开始阅读</router-link>
-              <button class="btn-outline" :disabled="favoriteLoading" @click="handleFavorite">
-                {{ favoriteLoading ? '...' : '收藏' }}
+              >
+                {{ primaryActionText }}
+              </router-link>
+              <button
+                class="btn-outline"
+                :class="{ 'is-active': readingState.isFavorite }"
+                :disabled="favoriteLoading"
+                @click="handleFavorite"
+              >
+                {{ favoriteText }}
               </button>
+            </div>
+
+            <div v-if="comic.episodes?.length" class="reading-overview">
+              <span v-if="readingStats.readCount" class="overview-pill">
+                已读 {{ readingStats.readCount }}/{{ readingStats.total }}
+              </span>
+              <span v-if="readingStats.inProgressCount" class="overview-pill overview-pill--progress">
+                进行中 {{ readingStats.inProgressCount }}
+              </span>
+              <span v-if="readingSummary" class="overview-detail">{{ readingSummary }}</span>
+              <span v-else-if="readingStateLoading" class="overview-detail">正在同步阅读状态...</span>
             </div>
           </div>
         </div>
 
-        <!-- Chapter List -->
-        <section v-if="comic.episodes && comic.episodes.length" class="chapter-section">
+        <section v-if="episodesWithState.length" class="chapter-section">
           <div class="chapter-header">
-            <h2 class="section-title">章节列表 ({{ comic.episodes.length }})</h2>
+            <div class="chapter-heading">
+              <h2 class="section-title">章节列表 ({{ episodesWithState.length }})</h2>
+              <p v-if="readingSummary" class="section-subtitle">{{ readingSummary }}</p>
+            </div>
+
             <div class="chapter-actions">
               <template v-if="cacheMode">
                 <button class="act-btn" @click="selectAll">全选</button>
@@ -292,9 +489,12 @@ onMounted(fetchComic)
                   class="act-btn act-btn-primary"
                   :disabled="!selectedIds.size"
                   @click="startCaching"
-                >缓存 ({{ selectedIds.size }})</button>
+                >
+                  缓存 ({{ selectedIds.size }})
+                </button>
                 <button class="act-btn" @click="toggleCacheMode">取消</button>
               </template>
+
               <template v-else>
                 <span v-if="cacheAllStats.readyCount > 0" class="cache-summary">
                   已缓存 {{ cacheAllStats.readyCount }}/{{ cacheAllStats.total }}
@@ -304,7 +504,9 @@ onMounted(fetchComic)
                   class="act-btn act-btn-primary"
                   :disabled="cacheAllLoading"
                   @click="cacheAll"
-                >{{ cacheAllLoading ? '队列中...' : `一键缓存 (${cacheAllStats.pendingCache.length})` }}</button>
+                >
+                  {{ cacheAllLoading ? '队列中...' : `一键缓存 (${cacheAllStats.pendingCache.length})` }}
+                </button>
                 <button class="act-btn" @click="toggleCacheMode">管理缓存</button>
               </template>
             </div>
@@ -312,51 +514,66 @@ onMounted(fetchComic)
 
           <div class="chapter-grid">
             <div
-              v-for="ep in comic.episodes"
-              :key="ep.id"
+              v-for="episode in episodesWithState"
+              :key="episode.id"
               :class="['chapter-item', {
-                'is-selected': cacheMode && selectedIds.has(ep.id),
-                'is-cached': cacheStatusMap[ep.id]?.status === 'ready',
-                'is-caching': cacheStatusMap[ep.id]?.status === 'downloading' || cacheStatusMap[ep.id]?.status === 'pending',
-                'is-error': cacheStatusMap[ep.id]?.status === 'error',
+                'is-selected': cacheMode && selectedIds.has(episode.id),
+                'is-cached': cacheStatusMap[episode.id]?.status === 'ready',
+                'is-caching': cacheStatusMap[episode.id]?.status === 'downloading' || cacheStatusMap[episode.id]?.status === 'pending',
+                'is-error': cacheStatusMap[episode.id]?.status === 'error',
+                'is-read': episode.reading?.isRead,
+                'is-reading': episode.reading && !episode.reading.isRead && episode.reading.progress > 0,
+                'is-latest-read': episode.isLastRead,
               }]"
-              @click="cacheMode ? toggleSelect(ep.id) : null"
+              @click="cacheMode ? toggleSelect(episode.id) : null"
             >
-              <!-- 缓存模式：复选框 -->
               <span v-if="cacheMode" class="ep-checkbox">
-                <svg v-if="selectedIds.has(ep.id)" width="16" height="16" viewBox="0 0 16 16" fill="var(--color-primary)">
-                  <rect width="16" height="16" rx="3"/>
-                  <path d="M4 8l3 3 5-5" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+                <svg v-if="selectedIds.has(episode.id)" width="16" height="16" viewBox="0 0 16 16" fill="var(--color-primary)">
+                  <rect width="16" height="16" rx="3" />
+                  <path d="M4 8l3 3 5-5" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round" />
                 </svg>
                 <svg v-else width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--color-border)" stroke-width="1.5">
-                  <rect x="0.75" y="0.75" width="14.5" height="14.5" rx="2.5"/>
+                  <rect x="0.75" y="0.75" width="14.5" height="14.5" rx="2.5" />
                 </svg>
               </span>
 
-              <!-- 非缓存模式：点击跳转 -->
               <router-link
                 v-if="!cacheMode"
-                :to="{ name: 'Reader', params: { photoId: ep.id } }"
+                :to="{ name: 'Reader', params: { photoId: episode.id } }"
                 class="ep-link"
               >
-                <span class="ep-sort">{{ ep.sort }}</span>
-                <span class="ep-title">{{ ep.title || `第${ep.sort}话` }}</span>
-                <!-- 缓存状态图标 -->
-                <span v-if="cacheStatusMap[ep.id]" class="ep-status">
-                  <span v-if="cacheStatusMap[ep.id].status === 'ready'" class="status-icon status-ready">✓</span>
-                  <span v-else-if="cacheStatusMap[ep.id].status === 'error'" class="status-icon status-error">✕</span>
-                  <span v-else class="status-icon status-loading">{{ cacheStatusMap[ep.id].progress }}%</span>
+                <span class="ep-sort">{{ episode.sort }}</span>
+                <span class="ep-body">
+                  <span class="ep-title">{{ getEpisodeTitle(episode) }}</span>
+                  <span
+                    v-if="getEpisodeReadingLabel(episode)"
+                    :class="['ep-reading-tag', getEpisodeReadingClass(episode)]"
+                  >
+                    {{ getEpisodeReadingLabel(episode) }}
+                  </span>
+                </span>
+                <span v-if="cacheStatusMap[episode.id]" class="ep-status">
+                  <span v-if="cacheStatusMap[episode.id].status === 'ready'" class="status-icon status-ready">✓</span>
+                  <span v-else-if="cacheStatusMap[episode.id].status === 'error'" class="status-icon status-error">✕</span>
+                  <span v-else class="status-icon status-loading">{{ cacheStatusMap[episode.id].progress }}%</span>
                 </span>
               </router-link>
 
-              <!-- 缓存模式下的内容 -->
               <template v-else>
-                <span class="ep-sort">{{ ep.sort }}</span>
-                <span class="ep-title">{{ ep.title || `第${ep.sort}话` }}</span>
-                <span v-if="cacheStatusMap[ep.id]" class="ep-status">
-                  <span v-if="cacheStatusMap[ep.id].status === 'ready'" class="status-icon status-ready">✓</span>
-                  <span v-else-if="cacheStatusMap[ep.id].status === 'error'" class="status-icon status-error">✕</span>
-                  <span v-else class="status-icon status-loading">{{ cacheStatusMap[ep.id].progress }}%</span>
+                <span class="ep-sort">{{ episode.sort }}</span>
+                <span class="ep-body">
+                  <span class="ep-title">{{ getEpisodeTitle(episode) }}</span>
+                  <span
+                    v-if="getEpisodeReadingLabel(episode)"
+                    :class="['ep-reading-tag', getEpisodeReadingClass(episode)]"
+                  >
+                    {{ getEpisodeReadingLabel(episode) }}
+                  </span>
+                </span>
+                <span v-if="cacheStatusMap[episode.id]" class="ep-status">
+                  <span v-if="cacheStatusMap[episode.id].status === 'ready'" class="status-icon status-ready">✓</span>
+                  <span v-else-if="cacheStatusMap[episode.id].status === 'error'" class="status-icon status-error">✕</span>
+                  <span v-else class="status-icon status-loading">{{ cacheStatusMap[episode.id].progress }}%</span>
                 </span>
               </template>
             </div>
@@ -483,6 +700,7 @@ onMounted(fetchComic)
   display: flex;
   gap: 10px;
   margin-top: 16px;
+  flex-wrap: wrap;
 }
 
 .btn-primary {
@@ -512,14 +730,60 @@ onMounted(fetchComic)
   transition: all 0.2s;
 }
 
-.btn-outline:hover {
+.btn-outline:hover:not(:disabled) {
   border-color: var(--color-primary);
   color: var(--color-primary);
 }
 
-/* Chapter section */
+.btn-outline.is-active {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.reading-overview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.overview-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.overview-pill--progress {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.overview-detail {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
 .chapter-section {
   margin-top: 36px;
+}
+
+.chapter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chapter-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .section-title {
@@ -528,13 +792,58 @@ onMounted(fetchComic)
   color: var(--color-text);
 }
 
+.section-subtitle {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.chapter-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.act-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-bg);
+  transition: all 0.2s;
+  cursor: pointer;
+}
+
+.act-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.act-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.act-btn-primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+}
+
+.act-btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+  color: #fff;
+}
+
 .chapter-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
   gap: 8px;
 }
 
 .chapter-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -555,19 +864,131 @@ onMounted(fetchComic)
   background: var(--color-primary-light);
 }
 
+.chapter-item.is-selected {
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.chapter-item.is-cached {
+  border-color: #16a34a;
+}
+
+.chapter-item.is-caching {
+  border-color: #d97706;
+}
+
+.chapter-item.is-error {
+  border-color: #dc2626;
+}
+
+.chapter-item.is-read:not(.is-cached):not(.is-latest-read) {
+  border-color: rgba(22, 163, 74, 0.45);
+}
+
+.chapter-item.is-reading:not(.is-caching):not(.is-latest-read) {
+  border-color: rgba(217, 119, 6, 0.45);
+}
+
+.chapter-item.is-latest-read:not(.is-selected) {
+  border-color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.ep-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  color: inherit;
+  text-decoration: none;
+}
+
+.ep-checkbox {
+  flex-shrink: 0;
+}
+
 .ep-sort {
   font-weight: 600;
   color: var(--color-primary);
   flex-shrink: 0;
 }
 
+.ep-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
 .ep-title {
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Skeleton */
+.ep-reading-tag {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ep-reading-tag--continue {
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.ep-reading-tag--read {
+  color: #15803d;
+  background: rgba(22, 163, 74, 0.12);
+}
+
+.ep-reading-tag--progress {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.ep-reading-tag--visited {
+  color: var(--color-text-secondary);
+  background: rgba(100, 116, 139, 0.12);
+}
+
+.ep-status {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.status-icon {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status-ready {
+  color: #16a34a;
+}
+
+.status-error {
+  color: #dc2626;
+}
+
+.status-loading {
+  color: #d97706;
+  font-size: 10px;
+}
+
+.cache-summary {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  padding: 5px 0;
+}
+
 .skeleton-detail {
   display: flex;
   gap: 28px;
@@ -615,8 +1036,13 @@ onMounted(fetchComic)
 }
 
 @keyframes shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
 }
 
 .error-state {
@@ -635,110 +1061,6 @@ onMounted(fetchComic)
   cursor: pointer;
 }
 
-.chapter-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.chapter-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.act-btn {
-  padding: 5px 14px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--color-text-secondary);
-  background: var(--color-bg);
-  transition: all 0.2s;
-  cursor: pointer;
-}
-
-.act-btn:hover:not(:disabled) {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-}
-
-.act-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.act-btn-primary {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: #fff;
-}
-
-.act-btn-primary:hover:not(:disabled) {
-  background: var(--color-primary-hover);
-  color: #fff;
-}
-
-/* 章节卡片状态 */
-.chapter-item {
-  position: relative;
-  cursor: pointer;
-}
-
-.chapter-item.is-selected {
-  border-color: var(--color-primary);
-  background: var(--color-primary-light);
-}
-
-.chapter-item.is-cached {
-  border-color: #16a34a;
-}
-
-.chapter-item.is-caching {
-  border-color: #d97706;
-}
-
-.chapter-item.is-error {
-  border-color: #dc2626;
-}
-
-.ep-link {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  color: inherit;
-  text-decoration: none;
-}
-
-.ep-checkbox {
-  flex-shrink: 0;
-}
-
-.ep-status {
-  margin-left: auto;
-  flex-shrink: 0;
-}
-
-.status-icon {
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.status-ready { color: #16a34a; }
-.status-error { color: #dc2626; }
-.status-loading { color: #d97706; font-size: 10px; }
-
-.cache-summary {
-  font-size: 12px;
-  color: var(--color-text-muted);
-  padding: 5px 0;
-}
-
 @media (max-width: 640px) {
   .detail-header {
     flex-direction: column;
@@ -754,7 +1076,8 @@ onMounted(fetchComic)
     justify-content: center;
   }
 
-  .actions {
+  .actions,
+  .reading-overview {
     justify-content: center;
   }
 
@@ -763,7 +1086,11 @@ onMounted(fetchComic)
   }
 
   .chapter-grid {
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  }
+
+  .chapter-heading {
+    width: 100%;
   }
 }
 </style>
