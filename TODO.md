@@ -5,13 +5,13 @@ This file tracks the next features and engineering work for the current project.
 ## P0
 
 - Persist local site user data in Docker and server deployments.
-  Status: Docker bind mount for `backend/site_data.db` is done. Ubuntu deploy script still needs to be updated to keep the database across redeploys.
+  Status: Done on 2026-04-21. Docker and Ubuntu now keep the SQLite site data in `backend/data/site_data.db`, and the Ubuntu deploy script migrates legacy `backend/site_data.db` on the first rerun.
 - Update non-Docker deployment docs and scripts to match the new local account system.
-  Scope: `scripts/deploy_ubuntu.sh`, `README-Server.md`.
+  Status: Done on 2026-04-21. `scripts/deploy_ubuntu.sh` and `README-Server.md` now use the per-user SQLite account model, `SITE_DB_PATH`, and documented backup / restore steps.
 - Improve admin user management.
-  Scope: delete user, disable user, reset password, self-service password change.
+  Status: Done on 2026-04-21. Admins can now create users, enable/disable users, grant/revoke admin, reset passwords, and users can change their own password from settings.
 - Add comment list support.
-  Scope: backend `GET /api/comments`, frontend comment panel, pagination.
+  Status: Done on 2026-04-21. The project now has site-local comment list, posting, replying, deleting, and pagination support on the comic detail page.
 
 ## P1
 
@@ -37,4 +37,4 @@ This file tracks the next features and engineering work for the current project.
 
 - Replace the obsolete `version` field in `docker-compose.yml`.
 - Review UTF-8 / Chinese text rendering consistency in docs and UI copy.
-- Add backup / restore guidance for `backend/site_data.db`.
+- Automate backup rotation for `backend/data/site_data.db`.

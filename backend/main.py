@@ -516,6 +516,20 @@ class CreateUserRequest(BaseModel):
     is_admin: bool = False
 
 
+class UpdateUserRequest(BaseModel):
+    is_admin: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+
+class ResetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+
 @app.get("/api/admin/users")
 def admin_users(_: dict = Depends(site_store.require_admin_user)):
     return {"items": site_store.list_users()}
@@ -527,6 +541,53 @@ def admin_create_user(
     _: dict = Depends(site_store.require_admin_user),
 ):
     user = site_store.create_user(body.username, body.password, body.is_admin)
+    return {"ok": True, "user": user}
+
+
+@app.patch("/api/admin/users/{user_id}")
+def admin_update_user(
+    user_id: int,
+    body: UpdateUserRequest,
+    current_user: dict = Depends(site_store.require_admin_user),
+):
+    user = site_store.update_user(
+        current_user["id"],
+        user_id,
+        is_admin=body.is_admin,
+        is_active=body.is_active,
+    )
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/admin/users/{user_id}/reset-password")
+def admin_reset_password(
+    user_id: int,
+    body: ResetPasswordRequest,
+    current_user: dict = Depends(site_store.require_admin_user),
+):
+    user = site_store.reset_user_password(current_user["id"], user_id, body.new_password)
+    return {"ok": True, "user": user}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(
+    user_id: int,
+    current_user: dict = Depends(site_store.require_admin_user),
+):
+    site_store.delete_user(current_user["id"], user_id)
+    return {"ok": True}
+
+
+@app.post("/api/auth/change-password")
+def auth_change_password(
+    body: ChangePasswordRequest,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    user = site_store.change_password(
+        current_user["id"],
+        body.current_password,
+        body.new_password,
+    )
     return {"ok": True, "user": user}
 
 
@@ -687,42 +748,70 @@ def save_reading_progress(
 # ---- Comment ----
 
 class CommentRequest(BaseModel):
-    video_id: str
-    comment: str
-    comment_id: Optional[str] = None
+    content: str = Field(..., min_length=1, max_length=2000)
+    parent_id: Optional[int] = None
 
 
-@app.post("/api/comments")
-def post_comment(body: CommentRequest):
-    """Post a comment or reply."""
-    try:
-        cl = get_client()
-        resp = cl.album_comment(
-            video_id=body.video_id,
-            comment=body.comment,
-            comment_id=body.comment_id,
-        )
-        return {"ok": True}
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(500, str(e))
+@app.get("/api/comments/{album_id}")
+def get_comments(
+    album_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    return site_store.list_comments(
+        album_id,
+        page,
+        page_size,
+        viewer_user_id=current_user["id"],
+        viewer_is_admin=current_user["is_admin"],
+    )
+
+
+@app.post("/api/comments/{album_id}")
+def post_comment(
+    album_id: str,
+    body: CommentRequest,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    item = site_store.create_comment(
+        current_user["id"],
+        album_id,
+        body.content,
+        body.parent_id,
+    )
+    return {"ok": True, "item": item}
+
+
+@app.delete("/api/comments/{comment_id}")
+def delete_comment(
+    comment_id: int,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    site_store.delete_comment(comment_id, current_user["id"], current_user["is_admin"])
+    return {"ok": True}
 
 
 # ---- Chapter Cache ----
 
 @app.get("/api/cache/library")
-def get_cache_library():
+def get_cache_library(current_user: dict = Depends(site_store.require_current_user)):
     """扫描磁盘，返回所有已缓存的专辑和章节信息"""
     albums = {}
     total_size = 0
 
-    if not CACHE_DIR.exists():
+    user_cache_map = site_store.get_user_cache_album_map(current_user["id"])
+
+    if not CACHE_DIR.exists() or not user_cache_map:
         return {"albums": {}, "total_size_bytes": 0}
 
     for album_dir in sorted(CACHE_DIR.iterdir()):
         if not album_dir.is_dir():
             continue
         album_id = album_dir.name
+        allowed_photo_ids = user_cache_map.get(album_id)
+        if not allowed_photo_ids:
+            continue
         chapters = {}
         album_size = 0
 
@@ -742,6 +831,8 @@ def get_cache_library():
             if not chapter_dir.is_dir():
                 continue
             photo_id = chapter_dir.name
+            if photo_id not in allowed_photo_ids:
+                continue
 
             # 读取章节标题
             chapter_meta_file = chapter_dir / 'meta.json'
@@ -784,54 +875,67 @@ def get_cache_library():
 
 
 @app.delete("/api/cache/{album_id}/{photo_id}")
-def delete_chapter_cache(album_id: str, photo_id: str):
+def delete_chapter_cache(
+    album_id: str,
+    photo_id: str,
+    current_user: dict = Depends(site_store.require_current_user),
+):
     """删除单个章节的缓存"""
     cache_dir = get_chapter_cache_dir(album_id, photo_id)
-    if not cache_dir.exists():
-        raise HTTPException(404, "章节缓存不存在")
+    removed = site_store.remove_user_cache_item(current_user["id"], album_id, photo_id)
+    if not removed:
+        raise HTTPException(404, "缓存记录不存在")
     try:
-        shutil.rmtree(str(cache_dir))
-        _cache_status.pop(photo_id, None)
-        _pdf_status.pop(photo_id, None)
+        shared = site_store.count_cache_links(album_id, photo_id) > 0
+        if not shared and cache_dir.exists():
+            shutil.rmtree(str(cache_dir))
+            _cache_status.pop(photo_id, None)
+            _pdf_status.pop(photo_id, None)
         # 若专辑目录空了则一并删除
-        album_dir = CACHE_DIR / album_id
-        if album_dir.exists() and not any(album_dir.iterdir()):
-            album_dir.rmdir()
-        return {"ok": True}
+            album_dir = CACHE_DIR / album_id
+            if album_dir.exists() and not any(album_dir.iterdir()):
+                album_dir.rmdir()
+        return {"ok": True, "shared": shared}
     except Exception as e:
         raise HTTPException(500, str(e))
 
 
 @app.delete("/api/cache/{album_id}")
-def delete_album_cache(album_id: str):
+def delete_album_cache(
+    album_id: str,
+    current_user: dict = Depends(site_store.require_current_user),
+):
     """删除整个专辑的缓存"""
     album_dir = CACHE_DIR / album_id
-    if not album_dir.exists():
-        raise HTTPException(404, "专辑缓存不存在")
+    photo_ids = site_store.remove_user_album_cache_items(current_user["id"], album_id)
+    if not photo_ids:
+        raise HTTPException(404, "缓存记录不存在")
     try:
         # 清理内存状态：仅清理属于该专辑的条目
-        photo_ids = {
-            chapter_dir.name
-            for chapter_dir in album_dir.iterdir()
-            if chapter_dir.is_dir()
-        }
-        for photo_id, info in list(_cache_status.items()):
-            if info.get('album_id') == album_id:
-                photo_ids.add(photo_id)
+        photo_ids = list(photo_ids)
         for photo_id in photo_ids:
+            if site_store.count_cache_links(album_id, photo_id) > 0:
+                continue
             _cache_status.pop(photo_id, None)
             _pdf_status.pop(photo_id, None)
-        shutil.rmtree(str(album_dir))
+            chapter_dir = get_chapter_cache_dir(album_id, photo_id)
+            if chapter_dir.exists():
+                shutil.rmtree(str(chapter_dir))
+        if album_dir.exists() and not any(album_dir.iterdir()):
+            shutil.rmtree(str(album_dir))
         return {"ok": True}
     except Exception as e:
         raise HTTPException(500, str(e))
 
 
 @app.get("/api/cache/queue")
-def get_cache_queue():
+def get_cache_queue(current_user: dict = Depends(site_store.require_current_user)):
     """返回所有缓存任务的实时状态（仅内存中的记录）"""
     queue = []
+    allowed_photo_ids = site_store.get_user_cache_photo_ids(current_user["id"])
     for photo_id, info in _cache_status.items():
+        if photo_id not in allowed_photo_ids:
+            continue
         queue.append({
             'photo_id': photo_id,
             'album_id': info.get('album_id', ''),
@@ -861,14 +965,25 @@ class CacheMetaBody(BaseModel):
 
 
 @app.post("/api/chapters/{album_id}/{photo_id}/cache")
-def start_chapter_cache(album_id: str, photo_id: str, background_tasks: BackgroundTasks, meta: CacheMetaBody = None):
+def start_chapter_cache(
+    album_id: str,
+    photo_id: str,
+    background_tasks: BackgroundTasks,
+    meta: CacheMetaBody = None,
+    current_user: dict = Depends(site_store.require_current_user),
+):
     cache_dir = get_chapter_cache_dir(album_id, photo_id)
     current = _cache_status.get(photo_id, {})
+    site_store.add_user_cache_item(current_user["id"], album_id, photo_id)
 
     if current.get('status') == 'downloading':
         return {"status": "downloading", "progress": current.get('progress', 0)}
 
     if current.get('status') == 'ready' and has_cached_images(cache_dir):
+        return {"status": "ready", "progress": 100}
+
+    if has_cached_images(cache_dir):
+        _cache_status[photo_id] = {'status': 'ready', 'progress': 100, 'album_id': album_id}
         return {"status": "ready", "progress": 100}
 
     # 持久化元数据到磁盘
@@ -899,7 +1014,13 @@ def start_chapter_cache(album_id: str, photo_id: str, background_tasks: Backgrou
 
 
 @app.get("/api/chapters/{album_id}/{photo_id}/cache/status")
-def get_chapter_cache_status(album_id: str, photo_id: str):
+def get_chapter_cache_status(
+    album_id: str,
+    photo_id: str,
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    if not site_store.has_user_cache_item(current_user["id"], album_id, photo_id):
+        return {"status": "not_started", "progress": 0}
     current = _cache_status.get(photo_id)
     if current:
         return {"status": current['status'], "progress": current.get('progress', 0)}
@@ -926,7 +1047,10 @@ def get_cached_image(album_id: str, photo_id: str, index: int):
 
 
 @app.get("/api/comics/{album_id}/cache/status")
-def get_album_cache_status(album_id: str):
+def get_album_cache_status(
+    album_id: str,
+    current_user: dict = Depends(site_store.require_current_user),
+):
     """一次性返回该漫画所有已缓存/缓存中章节的状态
 
     只返回有缓存记录的章节（磁盘有目录 或 内存有状态），
@@ -935,6 +1059,10 @@ def get_album_cache_status(album_id: str):
     """
     result = {}
     album_dir = CACHE_DIR / album_id
+    allowed_photo_ids = site_store.get_user_cache_photo_ids(current_user["id"], album_id)
+
+    if not allowed_photo_ids:
+        return result
 
     # 先扫描磁盘：章节目录存在且有图片 → ready
     if album_dir.exists():
@@ -942,12 +1070,12 @@ def get_album_cache_status(album_id: str):
             if not chapter_dir.is_dir():
                 continue
             photo_id = chapter_dir.name
-            if has_cached_images(chapter_dir):
+            if photo_id in allowed_photo_ids and has_cached_images(chapter_dir):
                 result[photo_id] = {'status': 'ready', 'progress': 100}
 
     # 用内存状态覆盖（内存更实时，能反映正在下载的进度）
     for photo_id, mem in _cache_status.items():
-        if mem.get('album_id') == album_id:
+        if mem.get('album_id') == album_id and photo_id in allowed_photo_ids:
             result[photo_id] = {
                 'status': mem.get('status', 'pending'),
                 'progress': mem.get('progress', 0),

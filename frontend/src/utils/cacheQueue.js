@@ -1,10 +1,31 @@
 import { ref, computed } from 'vue'
 import http from '../api'
 
-const STORAGE_KEY = 'cache_meta'
+function getStorageKey() {
+  try {
+    const raw = localStorage.getItem('auth_user')
+    const user = raw ? JSON.parse(raw) : null
+    const suffix = user?.id || user?.username || 'guest'
+    return `cache_meta:${suffix}`
+  } catch {
+    return 'cache_meta:guest'
+  }
+}
+
+function readMeta() {
+  try {
+    return JSON.parse(localStorage.getItem(getStorageKey()) || '{}')
+  } catch {
+    return {}
+  }
+}
+
+function writeMeta(value) {
+  localStorage.setItem(getStorageKey(), JSON.stringify(value))
+}
 
 // 本地元数据：{ [photoId]: { albumId, albumTitle, chapterTitle } }
-const meta = ref(JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'))
+const meta = ref(readMeta())
 
 // 队列条目（从后端拉取后与元数据合并）
 export const queueItems = ref([])
@@ -33,7 +54,7 @@ export const groupedQueue = computed(() => {
 // 注册元数据（开始缓存时调用）
 export function registerMeta(photoId, { albumId, albumTitle, chapterTitle }) {
   meta.value[photoId] = { albumId, albumTitle, chapterTitle }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(meta.value))
+  writeMeta(meta.value)
 }
 
 async function fetchQueue() {
@@ -100,6 +121,6 @@ export async function clearCompleted() {
       if (activeIds.has(id)) newMeta[id] = m
     })
     meta.value = newMeta
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(newMeta))
+    writeMeta(newMeta)
   } catch { /* silent */ }
 }

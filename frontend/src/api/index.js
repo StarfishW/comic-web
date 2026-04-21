@@ -81,6 +81,18 @@ export const getAdminUsers = () =>
 export const createAdminUser = (payload) =>
   http.post('/admin/users', payload)
 
+export const updateAdminUser = (userId, payload) =>
+  http.patch(`/admin/users/${userId}`, payload)
+
+export const resetAdminUserPassword = (userId, newPassword) =>
+  http.post(`/admin/users/${userId}/reset-password`, { new_password: newPassword })
+
+export const deleteAdminUser = (userId) =>
+  http.delete(`/admin/users/${userId}`)
+
+export const changePassword = (payload) =>
+  http.post('/auth/change-password', payload)
+
 // ---- Favorites ----
 export const getFavorites = (params = {}) =>
   http.get('/favorites', { params })
@@ -114,8 +126,14 @@ export const getReadingState = (albumId) =>
   http.get(`/reading/${albumId}`)
 
 // ---- Comment ----
-export const postComment = (videoId, comment, commentId = null) =>
-  http.post('/comments', { video_id: videoId, comment, comment_id: commentId })
+export const getComments = (albumId, params = {}) =>
+  http.get(`/comments/${albumId}`, { params })
+
+export const postComment = (albumId, content, parentId = null) =>
+  http.post(`/comments/${albumId}`, { content, parent_id: parentId })
+
+export const deleteComment = (commentId) =>
+  http.delete(`/comments/${commentId}`)
 
 // ---- Domain Management ----
 export const getDomains = () =>

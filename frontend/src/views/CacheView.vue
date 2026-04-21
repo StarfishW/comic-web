@@ -3,8 +3,23 @@ import { ref, computed, onMounted } from 'vue'
 import { getCacheLibrary, deleteChapterCache, deleteAlbumCache, getCoverUrl } from '../api'
 import LazyImage from '../components/LazyImage.vue'
 
-const STORAGE_KEY = 'cache_meta'
-const localMeta = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
+function getStorageKey() {
+  try {
+    const raw = localStorage.getItem('auth_user')
+    const user = raw ? JSON.parse(raw) : null
+    const suffix = user?.id || user?.username || 'guest'
+    return `cache_meta:${suffix}`
+  } catch {
+    return 'cache_meta:guest'
+  }
+}
+
+let localMeta = {}
+try {
+  localMeta = JSON.parse(localStorage.getItem(getStorageKey()) || '{}')
+} catch {
+  localMeta = {}
+}
 
 function getAlbumTitle(albumId, albumInfo) {
   if (albumInfo?.album_title) return albumInfo.album_title

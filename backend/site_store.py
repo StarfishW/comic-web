@@ -25,7 +25,6 @@ def _now_ts() -> int:
 def _ensure_db_target() -> None:
     if DB_PATH.exists() and DB_PATH.is_dir():
         raise RuntimeError(f"Database path is a directory, not a file: {DB_PATH}")
-
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
@@ -69,6 +68,7 @@ def _serialize_user(row) -> dict:
         "id": row["id"],
         "username": row["username"],
         "is_admin": bool(row["is_admin"]),
+        "is_active": bool(row["is_active"]),
         "created_at": row["created_at"],
     }
 
@@ -114,6 +114,34 @@ def _serialize_chapter_progress(row) -> dict:
     }
 
 
+def _serialize_comment(row) -> dict:
+    return {
+        "id": row["id"],
+        "album_id": row["album_id"],
+        "parent_id": row["parent_id"],
+        "content": "" if row["is_deleted"] else row["content"],
+        "is_deleted": bool(row["is_deleted"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "user": {
+            "id": row["user_id"],
+            "username": row["username"] or "",
+            "is_admin": bool(row["is_admin"]),
+        },
+    }
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row["name"] for row in rows}
+
+
+def _active_admin_count(conn: sqlite3.Connection) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS total FROM users WHERE is_admin = 1 AND is_active = 1"
+    ).fetchone()["total"]
+
+
 def init_site_storage() -> None:
     _ensure_db_target()
     with db_conn() as conn:
@@ -126,6 +154,7 @@ def init_site_storage() -> None:
                 password_salt TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -194,6 +223,41 @@ def init_site_storage() -> None:
             """
         )
         conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                album_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                parent_id INTEGER,
+                content TEXT NOT NULL,
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (parent_id) REFERENCES comments(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_cache_items (
+                user_id INTEGER NOT NULL,
+                album_id TEXT NOT NULL,
+                photo_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, photo_id),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        if "is_active" not in _table_columns(conn, "users"):
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+            )
+
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)"
         )
         conn.execute(
@@ -205,6 +269,12 @@ def init_site_storage() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_progress_user_album_updated ON chapter_progress(user_id, album_id, updated_at DESC)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_comments_album_parent_created ON comments(album_id, parent_id, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_cache_items_user_album ON user_cache_items(user_id, album_id, updated_at DESC)"
+        )
 
         admin = conn.execute(
             "SELECT id FROM users WHERE username = ?",
@@ -215,8 +285,8 @@ def init_site_storage() -> None:
             salt_hex, password_hash = _hash_password("wyq666")
             conn.execute(
                 """
-                INSERT INTO users (username, password_salt, password_hash, is_admin, created_at, updated_at)
-                VALUES (?, ?, ?, 1, ?, ?)
+                INSERT INTO users (username, password_salt, password_hash, is_admin, is_active, created_at, updated_at)
+                VALUES (?, ?, ?, 1, 1, ?, ?)
                 """,
                 ("admin", salt_hex, password_hash, now, now),
             )
@@ -235,8 +305,8 @@ def create_user(username: str, password: str, is_admin: bool = False) -> dict:
         with db_conn() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO users (username, password_salt, password_hash, is_admin, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO users (username, password_salt, password_hash, is_admin, is_active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
                 """,
                 (normalized, salt_hex, password_hash, int(is_admin), now, now),
             )
@@ -252,9 +322,129 @@ def create_user(username: str, password: str, is_admin: bool = False) -> dict:
 def list_users() -> list[dict]:
     with db_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM users ORDER BY is_admin DESC, username ASC"
+            "SELECT * FROM users ORDER BY is_active DESC, is_admin DESC, username ASC"
         ).fetchall()
         return [_serialize_user(row) for row in rows]
+
+
+def update_user(
+    actor_user_id: int,
+    target_user_id: int,
+    *,
+    is_admin: Optional[bool] = None,
+    is_active: Optional[bool] = None,
+) -> dict:
+    with db_conn() as conn:
+        target = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (target_user_id,),
+        ).fetchone()
+        if not target:
+            raise HTTPException(404, "用户不存在")
+
+        if actor_user_id == target_user_id:
+            raise HTTPException(400, "不能在此处修改当前登录账号状态")
+
+        next_is_admin = bool(target["is_admin"]) if is_admin is None else bool(is_admin)
+        next_is_active = bool(target["is_active"]) if is_active is None else bool(is_active)
+
+        if bool(target["is_admin"]) and bool(target["is_active"]):
+            losing_last_admin = (not next_is_admin or not next_is_active) and _active_admin_count(conn) <= 1
+            if losing_last_admin:
+                raise HTTPException(400, "至少需要保留一个启用中的管理员账号")
+
+        conn.execute(
+            """
+            UPDATE users
+            SET is_admin = ?, is_active = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (int(next_is_admin), int(next_is_active), _now_ts(), target_user_id),
+        )
+        if not next_is_active:
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (target_user_id,))
+        row = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (target_user_id,),
+        ).fetchone()
+        return _serialize_user(row)
+
+
+def reset_user_password(actor_user_id: int, target_user_id: int, new_password: str) -> dict:
+    if len(new_password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+
+    with db_conn() as conn:
+        target = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (target_user_id,),
+        ).fetchone()
+        if not target:
+            raise HTTPException(404, "用户不存在")
+
+        salt_hex, password_hash = _hash_password(new_password)
+        conn.execute(
+            """
+            UPDATE users
+            SET password_salt = ?, password_hash = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (salt_hex, password_hash, _now_ts(), target_user_id),
+        )
+        if actor_user_id != target_user_id:
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (target_user_id,))
+        row = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (target_user_id,),
+        ).fetchone()
+        return _serialize_user(row)
+
+
+def change_password(user_id: int, current_password: str, new_password: str) -> dict:
+    if len(new_password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "用户不存在")
+        if not _verify_password(current_password, row["password_salt"], row["password_hash"]):
+            raise HTTPException(400, "当前密码不正确")
+
+        salt_hex, password_hash = _hash_password(new_password)
+        conn.execute(
+            """
+            UPDATE users
+            SET password_salt = ?, password_hash = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (salt_hex, password_hash, _now_ts(), user_id),
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        updated = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        return _serialize_user(updated)
+
+
+def delete_user(actor_user_id: int, target_user_id: int) -> None:
+    with db_conn() as conn:
+        target = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (target_user_id,),
+        ).fetchone()
+        if not target:
+            raise HTTPException(404, "用户不存在")
+        if actor_user_id == target_user_id:
+            raise HTTPException(400, "不能删除当前登录账号")
+        if bool(target["is_admin"]) and bool(target["is_active"]) and _active_admin_count(conn) <= 1:
+            raise HTTPException(400, "至少需要保留一个启用中的管理员账号")
+
+        conn.execute("DELETE FROM users WHERE id = ?", (target_user_id,))
 
 
 def authenticate_user(username: str, password: str) -> Optional[dict]:
@@ -265,6 +455,8 @@ def authenticate_user(username: str, password: str) -> Optional[dict]:
             (normalized,),
         ).fetchone()
         if not row or not _verify_password(password, row["password_salt"], row["password_hash"]):
+            return None
+        if not bool(row["is_active"]):
             return None
 
         token = secrets.token_urlsafe(32)
@@ -311,6 +503,9 @@ def get_user_by_token(token: str) -> Optional[dict]:
             (token, now),
         ).fetchone()
         if row:
+            if not bool(row["is_active"]):
+                conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+                return None
             return _serialize_user(row)
         conn.execute(
             "DELETE FROM sessions WHERE token = ? OR expires_at <= ?",
@@ -587,3 +782,231 @@ def get_reading_state(user_id: int, album_id: str) -> dict:
         "chapters": chapters,
         "progress_map": progress_map,
     }
+
+
+def add_user_cache_item(user_id: int, album_id: str, photo_id: str) -> None:
+    now = _now_ts()
+    with db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_cache_items (user_id, album_id, photo_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, photo_id) DO UPDATE SET
+                album_id = excluded.album_id,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, album_id, photo_id, now, now),
+        )
+
+
+def has_user_cache_item(user_id: int, album_id: str, photo_id: str) -> bool:
+    with db_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM user_cache_items
+            WHERE user_id = ? AND album_id = ? AND photo_id = ?
+            """,
+            (user_id, album_id, photo_id),
+        ).fetchone()
+    return bool(row)
+
+
+def get_user_cache_photo_ids(user_id: int, album_id: Optional[str] = None) -> set[str]:
+    with db_conn() as conn:
+        if album_id is None:
+            rows = conn.execute(
+                "SELECT photo_id FROM user_cache_items WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT photo_id FROM user_cache_items WHERE user_id = ? AND album_id = ?",
+                (user_id, album_id),
+            ).fetchall()
+    return {row["photo_id"] for row in rows}
+
+
+def get_user_cache_album_map(user_id: int) -> dict[str, set[str]]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT album_id, photo_id FROM user_cache_items WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+
+    result: dict[str, set[str]] = {}
+    for row in rows:
+        result.setdefault(row["album_id"], set()).add(row["photo_id"])
+    return result
+
+
+def remove_user_cache_item(user_id: int, album_id: str, photo_id: str) -> bool:
+    with db_conn() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM user_cache_items
+            WHERE user_id = ? AND album_id = ? AND photo_id = ?
+            """,
+            (user_id, album_id, photo_id),
+        )
+    return cur.rowcount > 0
+
+
+def remove_user_album_cache_items(user_id: int, album_id: str) -> list[str]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT photo_id FROM user_cache_items WHERE user_id = ? AND album_id = ?",
+            (user_id, album_id),
+        ).fetchall()
+        photo_ids = [row["photo_id"] for row in rows]
+        conn.execute(
+            "DELETE FROM user_cache_items WHERE user_id = ? AND album_id = ?",
+            (user_id, album_id),
+        )
+    return photo_ids
+
+
+def count_cache_links(album_id: str, photo_id: str) -> int:
+    with db_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS total
+            FROM user_cache_items
+            WHERE album_id = ? AND photo_id = ?
+            """,
+            (album_id, photo_id),
+        ).fetchone()
+    return row["total"]
+
+
+def list_comments(
+    album_id: str,
+    page: int,
+    page_size: int,
+    *,
+    viewer_user_id: Optional[int] = None,
+    viewer_is_admin: bool = False,
+) -> dict:
+    offset = (page - 1) * page_size
+    with db_conn() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) AS total FROM comments WHERE album_id = ? AND parent_id IS NULL",
+            (album_id,),
+        ).fetchone()["total"]
+        roots = conn.execute(
+            """
+            SELECT comments.*, users.username, users.is_admin
+            FROM comments
+            JOIN users ON users.id = comments.user_id
+            WHERE comments.album_id = ? AND comments.parent_id IS NULL
+            ORDER BY comments.created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (album_id, page_size, offset),
+        ).fetchall()
+
+        root_ids = [row["id"] for row in roots]
+        descendants = []
+        pending_parent_ids = root_ids[:]
+        while pending_parent_ids:
+            placeholders = ",".join("?" for _ in pending_parent_ids)
+            batch = conn.execute(
+                f"""
+                SELECT comments.*, users.username, users.is_admin
+                FROM comments
+                JOIN users ON users.id = comments.user_id
+                WHERE comments.parent_id IN ({placeholders})
+                ORDER BY comments.created_at ASC
+                """,
+                pending_parent_ids,
+            ).fetchall()
+            if not batch:
+                break
+            descendants.extend(batch)
+            pending_parent_ids = [row["id"] for row in batch]
+
+    comment_map = {}
+    for row in roots:
+        item = _serialize_comment(row)
+        item["can_delete"] = viewer_is_admin or row["user_id"] == viewer_user_id
+        item["replies"] = []
+        comment_map[row["id"]] = item
+
+    for row in descendants:
+        item = _serialize_comment(row)
+        item["can_delete"] = viewer_is_admin or row["user_id"] == viewer_user_id
+        item["replies"] = []
+        comment_map[row["id"]] = item
+
+    items = [comment_map[row["id"]] for row in roots]
+    for row in descendants:
+        parent = comment_map.get(row["parent_id"])
+        if parent:
+            parent["replies"].append(comment_map[row["id"]])
+
+    return {
+        "items": items,
+        "total": total,
+        "page_count": math.ceil(total / page_size) if total else 0,
+    }
+
+
+def create_comment(user_id: int, album_id: str, content: str, parent_id: Optional[int] = None) -> dict:
+    text = content.strip()
+    if not text:
+        raise HTTPException(400, "评论内容不能为空")
+    if len(text) > 2000:
+        raise HTTPException(400, "评论内容过长")
+
+    now = _now_ts()
+    with db_conn() as conn:
+        if parent_id is not None:
+            parent = conn.execute(
+                "SELECT * FROM comments WHERE id = ? AND album_id = ?",
+                (parent_id, album_id),
+            ).fetchone()
+            if not parent:
+                raise HTTPException(404, "回复目标不存在")
+
+        cur = conn.execute(
+            """
+            INSERT INTO comments (album_id, user_id, parent_id, content, is_deleted, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 0, ?, ?)
+            """,
+            (album_id, user_id, parent_id, text, now, now),
+        )
+        row = conn.execute(
+            """
+            SELECT comments.*, users.username, users.is_admin
+            FROM comments
+            JOIN users ON users.id = comments.user_id
+            WHERE comments.id = ?
+            """,
+            (cur.lastrowid,),
+        ).fetchone()
+
+    item = _serialize_comment(row)
+    item["can_delete"] = True
+    item["replies"] = []
+    return item
+
+
+def delete_comment(comment_id: int, actor_user_id: int, actor_is_admin: bool) -> None:
+    with db_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM comments WHERE id = ?",
+            (comment_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "评论不存在")
+        if row["user_id"] != actor_user_id and not actor_is_admin:
+            raise HTTPException(403, "无权删除这条评论")
+
+        conn.execute(
+            """
+            UPDATE comments
+            SET content = '', is_deleted = 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (_now_ts(), comment_id),
+        )

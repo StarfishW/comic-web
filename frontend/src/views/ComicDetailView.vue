@@ -5,6 +5,7 @@ import { registerMeta, startPolling as startGlobalPolling } from '../utils/cache
 import { setDocumentTitle, resetDocumentTitle } from '../utils/documentTitle'
 import { formatEpisodeProgress, mergeEpisodesWithReadingState, normalizeReadingState } from '../utils/reading'
 import LazyImage from '../components/LazyImage.vue'
+import CommentSection from '../components/CommentSection.vue'
 
 const props = defineProps({ id: { type: String, required: true } })
 
@@ -579,6 +580,12 @@ onUnmounted(resetDocumentTitle)
             </div>
           </div>
         </section>
+
+        <CommentSection
+          :album-id="props.id"
+          :title="comic.title || ''"
+          :initial-count="comic.comment_count || comic.comments_count || 0"
+        />
       </template>
     </div>
   </div>

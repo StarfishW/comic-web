@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { pingDomains, switchDomain, logout as requestLogout } from '../api'
+import { changePassword, pingDomains, switchDomain, logout as requestLogout } from '../api'
 import { placeholderStyle, setPlaceholderStyle, PLACEHOLDER_STYLES } from '../utils/placeholder'
 import { viewMode, setViewMode } from '../utils/viewMode'
 
@@ -11,6 +11,14 @@ const switching = ref('')
 const results = ref([])
 const currentDomains = ref([])
 const error = ref('')
+const passwordForm = ref({
+  current_password: '',
+  new_password: '',
+  confirm_password: '',
+})
+const passwordLoading = ref(false)
+const passwordMessage = ref('')
+const passwordError = ref('')
 
 const activeDomain = computed(() => currentDomains.value[0] || '')
 
@@ -52,6 +60,45 @@ async function handleLogout() {
     localStorage.removeItem('is_authenticated')
     window.dispatchEvent(new CustomEvent('auth:changed'))
     router.push('/login')
+  }
+}
+
+async function handleChangePassword() {
+  const currentPassword = passwordForm.value.current_password
+  const newPassword = passwordForm.value.new_password
+  const confirmPassword = passwordForm.value.confirm_password
+
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    passwordError.value = '请填写完整的密码信息'
+    passwordMessage.value = ''
+    return
+  }
+
+  if (newPassword !== confirmPassword) {
+    passwordError.value = '两次输入的新密码不一致'
+    passwordMessage.value = ''
+    return
+  }
+
+  try {
+    passwordLoading.value = true
+    passwordError.value = ''
+    passwordMessage.value = ''
+    await changePassword({
+      current_password: currentPassword,
+      new_password: newPassword,
+    })
+    passwordForm.value = {
+      current_password: '',
+      new_password: '',
+      confirm_password: '',
+    }
+    passwordMessage.value = '密码已修改，请重新登录'
+    await handleLogout()
+  } catch (e) {
+    passwordError.value = e.response?.data?.detail || e.message || '修改密码失败'
+  } finally {
+    passwordLoading.value = false
   }
 }
 
@@ -211,6 +258,56 @@ onMounted(fetchPing)
         </div>
       </div>
 
+      <div class="section">
+        <h2 class="section-title">修改密码</h2>
+        <p class="section-desc">修改当前登录账号的密码。修改成功后会自动退出当前会话。</p>
+
+        <div v-if="passwordError" class="error-msg">{{ passwordError }}</div>
+        <div v-if="passwordMessage" class="success-msg">{{ passwordMessage }}</div>
+
+        <form class="password-form" @submit.prevent="handleChangePassword">
+          <div class="field">
+            <label for="current-password" class="field-label">当前密码</label>
+            <input
+              id="current-password"
+              v-model="passwordForm.current_password"
+              type="password"
+              class="field-input"
+              autocomplete="current-password"
+              placeholder="输入当前密码"
+            />
+          </div>
+
+          <div class="field">
+            <label for="new-password" class="field-label">新密码</label>
+            <input
+              id="new-password"
+              v-model="passwordForm.new_password"
+              type="password"
+              class="field-input"
+              autocomplete="new-password"
+              placeholder="至少 6 位"
+            />
+          </div>
+
+          <div class="field">
+            <label for="confirm-password" class="field-label">确认新密码</label>
+            <input
+              id="confirm-password"
+              v-model="passwordForm.confirm_password"
+              type="password"
+              class="field-input"
+              autocomplete="new-password"
+              placeholder="再次输入新密码"
+            />
+          </div>
+
+          <button class="save-btn" type="submit" :disabled="passwordLoading">
+            {{ passwordLoading ? '提交中...' : '修改密码' }}
+          </button>
+        </form>
+      </div>
+
       <!-- Logout Section -->
       <div class="section logout-section">
         <h2 class="section-title">账户</h2>
@@ -319,6 +416,71 @@ onMounted(fetchPing)
   border-radius: var(--radius-sm);
   font-size: 13px;
   margin-bottom: 16px;
+}
+
+.success-msg {
+  background: rgba(16, 185, 129, 0.12);
+  color: #166534;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.password-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.field-input {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.field-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
+}
+
+.save-btn {
+  align-self: flex-start;
+  min-height: 40px;
+  padding: 0 18px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-hover));
+  box-shadow: 0 14px 24px rgba(37, 99, 235, 0.18);
+  transition: transform 0.2s, opacity 0.2s;
+}
+
+.save-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.save-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
 }
 
 .domain-list {
