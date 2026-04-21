@@ -25,6 +25,7 @@ const avatarPreview = ref('')
 const avatarUploading = ref(false)
 const avatarError = ref('')
 const avatarMessage = ref('')
+const avatarInputRef = ref(null)
 
 const activeDomain = computed(() => currentDomains.value[0] || '')
 const currentAvatar = computed(() => avatarPreview.value || authState.user?.avatar_url || '')
@@ -125,7 +126,13 @@ function handleAvatarChange(event) {
 
   if (file) {
     avatarPreview.value = URL.createObjectURL(file)
+    void handleAvatarUpload()
   }
+}
+
+function triggerAvatarPicker() {
+  if (avatarUploading.value) return
+  avatarInputRef.value?.click()
 }
 
 async function handleAvatarUpload() {
@@ -142,6 +149,9 @@ async function handleAvatarUpload() {
     avatarMessage.value = '头像已更新'
     avatarFile.value = null
     clearAvatarPreview()
+    if (avatarInputRef.value) {
+      avatarInputRef.value.value = ''
+    }
   } catch (e) {
     avatarError.value = e.response?.data?.detail || e.message || '头像上传失败'
   } finally {
@@ -311,24 +321,35 @@ onUnmounted(clearAvatarPreview)
         <p class="section-desc">上传后会在头部和评论区等用户展示位置生效。</p>
 
         <div class="avatar-block">
-          <div class="avatar-preview">
+          <button
+            class="avatar-preview avatar-preview--interactive"
+            type="button"
+            :disabled="avatarUploading"
+            aria-label="点击更换头像"
+            @click="triggerAvatarPicker"
+          >
             <img v-if="currentAvatar" :src="currentAvatar" alt="当前头像" class="avatar-image" />
             <span v-else class="avatar-fallback">
               {{ (authState.user?.displayName || authState.user?.username || 'U').slice(0, 1) }}
             </span>
-          </div>
+            <span class="avatar-overlay">
+              {{ avatarUploading ? '上传中...' : '点击更换头像' }}
+            </span>
+          </button>
 
           <div class="avatar-actions">
             <input
+              ref="avatarInputRef"
               class="file-input"
               type="file"
               accept="image/png,image/jpeg,image/webp,image/gif"
               @change="handleAvatarChange"
             />
 
-            <button class="save-btn" type="button" :disabled="!avatarFile || avatarUploading" @click="handleAvatarUpload">
-              {{ avatarUploading ? '上传中...' : '上传头像' }}
+            <button class="secondary-btn" type="button" :disabled="avatarUploading" @click="triggerAvatarPicker">
+              {{ avatarUploading ? '上传中...' : '选择新头像' }}
             </button>
+            <p class="avatar-hint">支持 PNG / JPG / WEBP / GIF，点击头像即可直接更换。</p>
           </div>
         </div>
 
@@ -521,6 +542,7 @@ onUnmounted(clearAvatarPreview)
 .avatar-preview {
   width: 88px;
   height: 88px;
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -530,10 +552,42 @@ onUnmounted(clearAvatarPreview)
   flex-shrink: 0;
 }
 
+.avatar-preview--interactive {
+  border: 2px solid transparent;
+  transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+}
+
+.avatar-preview--interactive:hover:not(:disabled),
+.avatar-preview--interactive:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(59, 130, 246, 0.35);
+  box-shadow: 0 16px 28px rgba(37, 99, 235, 0.18);
+}
+
+.avatar-preview--interactive:disabled {
+  opacity: 0.8;
+  cursor: wait;
+}
+
 .avatar-image {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.avatar-overlay {
+  position: absolute;
+  inset: auto 6px 6px 6px;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .avatar-fallback {
@@ -549,8 +603,43 @@ onUnmounted(clearAvatarPreview)
 }
 
 .file-input {
-  font-size: 13px;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.secondary-btn {
+  min-height: 40px;
+  padding: 0 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 700;
   color: var(--color-text-secondary);
+  background: var(--color-bg);
+  transition: transform 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.secondary-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.secondary-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.avatar-hint {
+  font-size: 12px;
+  color: var(--color-text-muted);
 }
 
 .field {

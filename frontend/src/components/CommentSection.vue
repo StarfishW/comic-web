@@ -17,15 +17,12 @@ const props = defineProps({
     type: String,
     default: '',
   },
-  initialCount: {
-    type: [Number, String],
-    default: 0,
-  },
 })
 
 const comments = ref([])
 const loading = ref(false)
 const loadingMore = ref(false)
+const refreshing = ref(false)
 const postingRoot = ref(false)
 const postingReply = ref(false)
 const deletingIds = ref(new Set())
@@ -39,12 +36,16 @@ const noticeType = ref('info')
 const rootDraft = ref('')
 const replyDraft = ref('')
 const replyTarget = ref(null)
+const hasLoadedOnce = ref(false)
 
 let requestId = 0
 
 const currentUser = computed(() => authState.user)
 const canPost = computed(() => Boolean(currentUser.value))
-const visibleCount = computed(() => total.value || Number(props.initialCount || 0) || countComments(comments.value))
+const visibleCount = computed(() => {
+  if (!hasLoadedOnce.value) return null
+  return total.value || countComments(comments.value) || 0
+})
 const sectionSubtitle = computed(() => (
   props.title ? `《${props.title}》的站内评论` : '站内评论'
 ))
@@ -157,12 +158,17 @@ function getErrorMessage(err, fallback) {
   return err?.response?.data?.detail || err?.message || fallback
 }
 
-async function loadComments(targetPage = 1, append = false) {
+async function loadComments(targetPage = 1, append = false, options = {}) {
   if (!props.albumId) return
 
+  const { soft = false } = options
   const currentRequestId = ++requestId
-  if (append) loadingMore.value = true
-  else {
+
+  if (append) {
+    loadingMore.value = true
+  } else if (soft) {
+    refreshing.value = true
+  } else {
     loading.value = true
     error.value = ''
   }
@@ -180,28 +186,33 @@ async function loadComments(targetPage = 1, append = false) {
     pageCount.value = Number(payload?.page_count || 0)
     total.value = Number(payload?.total || countComments(comments.value))
     hasMore.value = pageCount.value > 0 ? targetPage < pageCount.value : normalized.length >= PAGE_SIZE
+    hasLoadedOnce.value = true
   } catch (err) {
     if (currentRequestId !== requestId) return
-    if (!append) {
+
+    if (!append && !soft) {
       comments.value = []
       page.value = 1
       pageCount.value = 0
       total.value = 0
       hasMore.value = false
+      hasLoadedOnce.value = false
       error.value = getErrorMessage(err, '评论加载失败，请稍后重试')
     } else {
-      setNotice(getErrorMessage(err, '加载更多评论失败'), 'error')
+      setNotice(getErrorMessage(err, soft ? '刷新评论失败，请稍后重试' : '加载更多评论失败'), 'error')
     }
   } finally {
     if (currentRequestId === requestId) {
       if (append) loadingMore.value = false
+      else if (soft) refreshing.value = false
       else loading.value = false
     }
   }
 }
 
-async function refreshComments() {
-  await loadComments(1, false)
+async function refreshComments(options = {}) {
+  const soft = options.soft === true && comments.value.length > 0
+  await loadComments(1, false, { soft })
 }
 
 async function loadMore() {
@@ -234,7 +245,7 @@ async function submitRootComment() {
     setNotice('')
     await api.postComment(props.albumId, content, null)
     rootDraft.value = ''
-    await refreshComments()
+    await refreshComments({ soft: true })
     setNotice('评论已发布', 'success')
   } catch (err) {
     setNotice(getErrorMessage(err, '评论发布失败，请稍后重试'), 'error')
@@ -253,7 +264,7 @@ async function submitReply() {
     await api.postComment(props.albumId, content, Number(replyTarget.value.id))
     replyDraft.value = ''
     replyTarget.value = null
-    await refreshComments()
+    await refreshComments({ soft: true })
     setNotice('回复已发布', 'success')
   } catch (err) {
     setNotice(getErrorMessage(err, '回复发布失败，请稍后重试'), 'error')
@@ -273,7 +284,7 @@ async function handleDelete(comment) {
     if (replyTarget.value?.id === comment.id) {
       cancelReply()
     }
-    await refreshComments()
+    await refreshComments({ soft: true })
     setNotice('评论已删除', 'success')
   } catch (err) {
     setNotice(getErrorMessage(err, '删除评论失败，请稍后重试'), 'error')
@@ -294,6 +305,7 @@ watch(
     total.value = 0
     hasMore.value = false
     error.value = ''
+    hasLoadedOnce.value = false
     setNotice('')
     void refreshComments()
   },
@@ -307,13 +319,18 @@ watch(
       <div>
         <h2 class="section-title">
           评论
-          <span class="count-badge">{{ visibleCount }}</span>
+          <span v-if="visibleCount !== null" class="count-badge">{{ visibleCount }}</span>
         </h2>
         <p class="section-subtitle">{{ sectionSubtitle }}</p>
       </div>
 
-      <button class="refresh-btn" :disabled="loading || loadingMore" @click="refreshComments">
-        {{ loading ? '刷新中...' : '刷新评论' }}
+      <button
+        class="refresh-btn"
+        :disabled="loading || loadingMore || refreshing"
+        @click="refreshComments({ soft: true })"
+      >
+        <span :class="['refresh-icon', { spinning: refreshing }]">↻</span>
+        {{ refreshing ? '刷新中' : '更新评论' }}
       </button>
     </div>
 
@@ -322,7 +339,7 @@ watch(
         <div>
           <p class="composer-title">发表评论</p>
           <p class="composer-desc">
-            {{ canPost ? '支持 Ctrl + Enter 快速发布' : '登录后可以参与评论与回复' }}
+            {{ canPost ? '支持 Ctrl + Enter 快速发布' : '登录后可以参与评论和回复' }}
           </p>
         </div>
         <router-link v-if="!canPost" to="/login" class="login-link">去登录</router-link>
@@ -543,12 +560,13 @@ watch(
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   min-height: 40px;
   padding: 0 16px;
   border-radius: 12px;
   font-size: 14px;
   font-weight: 700;
-  transition: transform 0.2s, opacity 0.2s, border-color 0.2s, color 0.2s;
+  transition: transform 0.2s, opacity 0.2s, border-color 0.2s, color 0.2s, background 0.2s;
 }
 
 .refresh-btn,
@@ -557,6 +575,24 @@ watch(
   border: 1px solid var(--color-border);
   color: var(--color-text-secondary);
   background: var(--color-bg);
+}
+
+.refresh-btn:hover:not(:disabled),
+.retry-btn:hover:not(:disabled),
+.load-more-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+}
+
+.refresh-icon {
+  display: inline-block;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.refresh-icon.spinning {
+  animation: spin 0.8s linear infinite;
 }
 
 .submit-btn {
@@ -828,6 +864,12 @@ watch(
 @keyframes shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 768px) {

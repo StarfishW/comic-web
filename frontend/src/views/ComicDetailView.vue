@@ -584,7 +584,6 @@ onUnmounted(resetDocumentTitle)
         <CommentSection
           :album-id="props.id"
           :title="comic.title || ''"
-          :initial-count="comic.comment_count || comic.comments_count || 0"
         />
       </template>
     </div>

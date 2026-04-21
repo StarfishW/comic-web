@@ -16,6 +16,7 @@ const keyword = ref('')
 const mobileMenuOpen = ref(false)
 const showCachePanel = ref(false)
 const showHistory = ref(false)
+const showProfileMenu = ref(false)
 const searchHistory = ref([])
 const loggingOut = ref(false)
 
@@ -78,12 +79,23 @@ function toggleMenu() {
   mobileMenuOpen.value = !mobileMenuOpen.value
 }
 
+function toggleProfileMenu() {
+  showProfileMenu.value = !showProfileMenu.value
+}
+
+function openProfileDestination(location) {
+  showProfileMenu.value = false
+  mobileMenuOpen.value = false
+  router.push(location)
+}
+
 async function handleLogout() {
   try {
     loggingOut.value = true
     await logoutUser()
     mobileMenuOpen.value = false
     showCachePanel.value = false
+    showProfileMenu.value = false
     showHistory.value = false
     router.push({ name: 'Login' })
   } finally {
@@ -94,8 +106,12 @@ async function handleLogout() {
 function onClickOutside(e) {
   const bar = document.querySelector('.search-bar')
   const mobileSearch = document.querySelector('.mobile-search')
+  const profileMenu = document.querySelector('.profile-wrap')
   if (bar && !bar.contains(e.target) && (!mobileSearch || !mobileSearch.contains(e.target))) {
     showHistory.value = false
+  }
+  if (profileMenu && !profileMenu.contains(e.target)) {
+    showProfileMenu.value = false
   }
 }
 
@@ -221,14 +237,36 @@ onUnmounted(() => {
       </form>
 
       <div v-if="authState.user" class="auth-actions" @click.stop>
-        <span v-if="currentUserAvatar" class="avatar-chip">
-          <img :src="currentUserAvatar" :alt="currentUserLabel" class="avatar-img" />
-        </span>
+        <div class="profile-wrap">
+          <button
+            class="avatar-trigger"
+            :class="{ active: showProfileMenu }"
+            :aria-expanded="showProfileMenu ? 'true' : 'false'"
+            aria-label="打开账户菜单"
+            @click="toggleProfileMenu"
+          >
+            <span v-if="currentUserAvatar" class="avatar-chip">
+              <img :src="currentUserAvatar" :alt="currentUserLabel" class="avatar-img" />
+            </span>
+            <span v-else class="avatar-chip avatar-chip--fallback">{{ currentUserLabel.slice(0, 1) }}</span>
+          </button>
+
+          <transition name="profile-fade">
+            <div v-if="showProfileMenu" class="profile-menu">
+              <div class="profile-menu-head">
+                <span class="profile-menu-label">当前用户</span>
+                <strong class="profile-menu-name">{{ currentUserLabel }}</strong>
+              </div>
+              <button class="profile-item" @click="openProfileDestination({ name: 'Settings' })">账户设置</button>
+              <button class="profile-item" @click="openProfileDestination({ name: 'Settings', query: { tab: 'avatar' } })">更换头像</button>
+              <button v-if="showAdminEntry" class="profile-item" @click="openProfileDestination({ name: 'AdminUsers' })">用户管理</button>
+              <button class="profile-item profile-item--danger" :disabled="loggingOut" @click="handleLogout">
+                {{ loggingOut ? '退出中...' : '退出登录' }}
+              </button>
+            </div>
+          </transition>
+        </div>
         <span class="user-chip" :title="currentUserLabel">{{ currentUserLabel }}</span>
-        <router-link v-if="showAdminEntry" to="/admin/users" class="nav-link auth-link">管理</router-link>
-        <button class="nav-link auth-link auth-logout" :disabled="loggingOut" @click="handleLogout">
-          {{ loggingOut ? '退出中...' : '退出' }}
-        </button>
       </div>
       <router-link v-else to="/login" class="login-link nav-link">登录</router-link>
 
@@ -263,13 +301,14 @@ onUnmounted(() => {
     <transition name="slide">
       <div v-if="mobileMenuOpen" class="mobile-menu">
         <nav class="mobile-nav">
-          <div v-if="authState.user" class="mobile-user-card">
+          <button v-if="authState.user" class="mobile-user-card" @click="openProfileDestination({ name: 'Settings', query: { tab: 'avatar' } })">
             <span v-if="currentUserAvatar" class="mobile-avatar-wrap">
               <img :src="currentUserAvatar" :alt="currentUserLabel" class="mobile-avatar" />
             </span>
             <span class="mobile-user-label">当前用户</span>
             <strong class="mobile-user-name">{{ currentUserLabel }}</strong>
-          </div>
+            <span class="mobile-user-action">点击头像管理账户</span>
+          </button>
           <router-link to="/" class="mobile-link" @click="mobileMenuOpen = false">首页</router-link>
           <router-link to="/ranking" class="mobile-link" @click="mobileMenuOpen = false">排行榜</router-link>
           <router-link to="/favorites" class="mobile-link" @click="mobileMenuOpen = false">收藏</router-link>
@@ -393,6 +432,27 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+.profile-wrap {
+  position: relative;
+}
+
+.avatar-trigger {
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  transition: transform 0.2s, box-shadow 0.2s, background 0.2s;
+}
+
+.avatar-trigger:hover,
+.avatar-trigger.active {
+  transform: translateY(-1px);
+  background: var(--color-primary-light);
+  box-shadow: 0 8px 20px rgba(59, 130, 246, 0.18);
+}
+
 .avatar-chip {
   width: 32px;
   height: 32px;
@@ -405,11 +465,89 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+.avatar-chip--fallback {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
 .avatar-img,
 .mobile-avatar {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.profile-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  min-width: 220px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-md);
+  z-index: 220;
+}
+
+.profile-menu-head {
+  padding: 10px 12px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.profile-menu-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.profile-menu-name {
+  display: block;
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--color-text);
+}
+
+.profile-item {
+  width: 100%;
+  padding: 10px 12px;
+  margin-top: 4px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-align: left;
+  transition: background 0.2s, color 0.2s;
+}
+
+.profile-item:hover:not(:disabled) {
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+}
+
+.profile-item--danger:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.12);
+  color: #dc2626;
+}
+
+.profile-item:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.profile-fade-enter-active,
+.profile-fade-leave-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.profile-fade-enter-from,
+.profile-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
 }
 
 .user-chip {
@@ -504,10 +642,12 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  width: 100%;
   padding: 12px 14px;
   margin-bottom: 6px;
   border-radius: var(--radius-md);
   background: var(--color-primary-light);
+  text-align: left;
 }
 
 .mobile-avatar-wrap {
@@ -530,6 +670,12 @@ onUnmounted(() => {
 .mobile-user-name {
   font-size: 15px;
   color: var(--color-primary);
+}
+
+.mobile-user-action {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--color-text-muted);
 }
 
 .mobile-link {
