@@ -102,6 +102,7 @@ function normalizeComment(item) {
     createdAt: item?.created_at || item?.updated_at || '',
     authorId: normalizeId(user?.id),
     authorName: user?.username || '匿名用户',
+    avatarUrl: user?.avatar_url || '',
     isAdmin: Boolean(user?.is_admin),
     canDelete: Boolean(item?.can_delete),
     replies: Array.isArray(item?.replies) ? item.replies.map(normalizeComment) : [],
@@ -370,7 +371,8 @@ watch(
       <article v-for="comment in comments" :key="comment.id" class="comment-card">
         <div class="comment-main">
           <div class="avatar">
-            <span>{{ comment.authorName.slice(0, 1) }}</span>
+            <img v-if="comment.avatarUrl" :src="comment.avatarUrl" :alt="comment.authorName" class="avatar-image" />
+            <span v-else>{{ comment.authorName.slice(0, 1) }}</span>
           </div>
 
           <div class="comment-body">
@@ -715,6 +717,12 @@ watch(
   font-weight: 700;
   color: var(--color-primary);
   background: var(--color-primary-light);
+}
+
+.avatar-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .comment-body {
