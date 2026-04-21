@@ -1,9 +1,10 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { changePassword, pingDomains, switchDomain, logout as requestLogout } from '../api'
+import { changePassword, pingDomains, switchDomain, uploadAvatar, logout as requestLogout } from '../api'
 import { placeholderStyle, setPlaceholderStyle, PLACEHOLDER_STYLES } from '../utils/placeholder'
 import { viewMode, setViewMode } from '../utils/viewMode'
+import { authState, setAuthUser } from '../utils/auth'
 
 const router = useRouter()
 const loading = ref(false)
@@ -19,8 +20,14 @@ const passwordForm = ref({
 const passwordLoading = ref(false)
 const passwordMessage = ref('')
 const passwordError = ref('')
+const avatarFile = ref(null)
+const avatarPreview = ref('')
+const avatarUploading = ref(false)
+const avatarError = ref('')
+const avatarMessage = ref('')
 
 const activeDomain = computed(() => currentDomains.value[0] || '')
+const currentAvatar = computed(() => avatarPreview.value || authState.user?.avatar_url || '')
 
 async function fetchPing() {
   try {
@@ -102,6 +109,46 @@ async function handleChangePassword() {
   }
 }
 
+function clearAvatarPreview() {
+  if (avatarPreview.value?.startsWith('blob:')) {
+    URL.revokeObjectURL(avatarPreview.value)
+  }
+  avatarPreview.value = ''
+}
+
+function handleAvatarChange(event) {
+  const file = event.target?.files?.[0] || null
+  avatarFile.value = file
+  avatarError.value = ''
+  avatarMessage.value = ''
+  clearAvatarPreview()
+
+  if (file) {
+    avatarPreview.value = URL.createObjectURL(file)
+  }
+}
+
+async function handleAvatarUpload() {
+  if (!avatarFile.value || avatarUploading.value) return
+
+  try {
+    avatarUploading.value = true
+    avatarError.value = ''
+    avatarMessage.value = ''
+    const response = await uploadAvatar(avatarFile.value)
+    if (response?.user) {
+      setAuthUser(response.user)
+    }
+    avatarMessage.value = '头像已更新'
+    avatarFile.value = null
+    clearAvatarPreview()
+  } catch (e) {
+    avatarError.value = e.response?.data?.detail || e.message || '头像上传失败'
+  } finally {
+    avatarUploading.value = false
+  }
+}
+
 function latencyColor(latency) {
   if (latency < 0) return 'latency-error'
   if (latency < 300) return 'latency-fast'
@@ -115,6 +162,7 @@ function latencyLabel(latency) {
 }
 
 onMounted(fetchPing)
+onUnmounted(clearAvatarPreview)
 </script>
 
 <template>
@@ -256,6 +304,36 @@ onMounted(fetchPing)
             </div>
           </button>
         </div>
+      </div>
+
+      <div class="section">
+        <h2 class="section-title">头像</h2>
+        <p class="section-desc">上传后会在头部和评论区等用户展示位置生效。</p>
+
+        <div class="avatar-block">
+          <div class="avatar-preview">
+            <img v-if="currentAvatar" :src="currentAvatar" alt="当前头像" class="avatar-image" />
+            <span v-else class="avatar-fallback">
+              {{ (authState.user?.displayName || authState.user?.username || 'U').slice(0, 1) }}
+            </span>
+          </div>
+
+          <div class="avatar-actions">
+            <input
+              class="file-input"
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              @change="handleAvatarChange"
+            />
+
+            <button class="save-btn" type="button" :disabled="!avatarFile || avatarUploading" @click="handleAvatarUpload">
+              {{ avatarUploading ? '上传中...' : '上传头像' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="avatarError" class="error-msg">{{ avatarError }}</div>
+        <div v-if="avatarMessage" class="success-msg">{{ avatarMessage }}</div>
       </div>
 
       <div class="section">
@@ -431,6 +509,48 @@ onMounted(fetchPing)
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.avatar-block {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.avatar-preview {
+  width: 88px;
+  height: 88px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--color-primary-light);
+  flex-shrink: 0;
+}
+
+.avatar-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-fallback {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--color-primary);
+}
+
+.avatar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.file-input {
+  font-size: 13px;
+  color: var(--color-text-secondary);
 }
 
 .field {

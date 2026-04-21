@@ -16,7 +16,7 @@ import shutil
 import zipfile
 import math
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Query, Response, BackgroundTasks, Depends, Header
+from fastapi import FastAPI, HTTPException, Query, Response, BackgroundTasks, Depends, Header, File, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -508,6 +508,26 @@ def logout(
 @app.get("/api/auth/me")
 def auth_me(current_user: dict = Depends(site_store.require_current_user)):
     return {"user": current_user}
+
+
+@app.post("/api/users/me/avatar")
+async def upload_my_avatar(
+    avatar: UploadFile = File(...),
+    current_user: dict = Depends(site_store.require_current_user),
+):
+    if not avatar.content_type or not avatar.content_type.startswith("image/"):
+        raise HTTPException(400, "只支持图片文件")
+    content = await avatar.read()
+    user = site_store.set_user_avatar(current_user["id"], content)
+    return {"ok": True, "user": user}
+
+
+@app.get("/api/users/{user_id}/avatar")
+def get_user_avatar(user_id: int):
+    avatar_path = site_store.get_avatar_path(user_id)
+    if not avatar_path.exists():
+        raise HTTPException(404, "头像不存在")
+    return FileResponse(str(avatar_path), media_type="image/jpeg")
 
 
 class CreateUserRequest(BaseModel):

@@ -165,6 +165,10 @@ export function getUserLabel(user = state.user) {
   return user.displayName || user.username || '当前用户'
 }
 
+export function setAuthUser(user, options = {}) {
+  return setUser(user, options)
+}
+
 export async function initAuth(options = {}) {
   const { force = false } = options
 

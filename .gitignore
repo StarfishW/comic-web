@@ -14,3 +14,5 @@ frontend/dist/
 backend/chapter_cache/
 backend/site_data.db
 backend/data/*.db
+backend/avatars/
+backend/data/avatars/

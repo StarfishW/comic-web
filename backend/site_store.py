@@ -15,6 +15,7 @@ from fastapi import Header, HTTPException
 
 DEFAULT_DB_PATH = Path(__file__).with_name("site_data.db")
 DB_PATH = Path(os.getenv("SITE_DB_PATH", str(DEFAULT_DB_PATH))).expanduser()
+AVATAR_DIR = DB_PATH.parent / "avatars"
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
@@ -26,6 +27,7 @@ def _ensure_db_target() -> None:
     if DB_PATH.exists() and DB_PATH.is_dir():
         raise RuntimeError(f"Database path is a directory, not a file: {DB_PATH}")
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @contextmanager
@@ -63,12 +65,24 @@ def _fallback_cover(album_id: str, cover: str = "") -> str:
     return cover or f"/api/comics/{album_id}/cover"
 
 
+def _avatar_url(user_id: int, avatar_updated_at: Optional[int]) -> str:
+    if not avatar_updated_at:
+        return ""
+    return f"/api/users/{user_id}/avatar?v={avatar_updated_at}"
+
+
+def get_avatar_path(user_id: int) -> Path:
+    return AVATAR_DIR / f"user_{user_id}.jpg"
+
+
 def _serialize_user(row) -> dict:
     return {
         "id": row["id"],
         "username": row["username"],
         "is_admin": bool(row["is_admin"]),
         "is_active": bool(row["is_active"]),
+        "avatar_url": _avatar_url(row["id"], row["avatar_updated_at"] if "avatar_updated_at" in row.keys() else None),
+        "avatar_updated_at": row["avatar_updated_at"] if "avatar_updated_at" in row.keys() else None,
         "created_at": row["created_at"],
     }
 
@@ -127,6 +141,7 @@ def _serialize_comment(row) -> dict:
             "id": row["user_id"],
             "username": row["username"] or "",
             "is_admin": bool(row["is_admin"]),
+            "avatar_url": _avatar_url(row["user_id"], row["avatar_updated_at"] if "avatar_updated_at" in row.keys() else None),
         },
     }
 
@@ -155,6 +170,7 @@ def init_site_storage() -> None:
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 is_active INTEGER NOT NULL DEFAULT 1,
+                avatar_updated_at INTEGER,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -255,6 +271,10 @@ def init_site_storage() -> None:
         if "is_active" not in _table_columns(conn, "users"):
             conn.execute(
                 "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+            )
+        if "avatar_updated_at" not in _table_columns(conn, "users"):
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN avatar_updated_at INTEGER"
             )
 
         conn.execute(
@@ -398,6 +418,42 @@ def reset_user_password(actor_user_id: int, target_user_id: int, new_password: s
             (target_user_id,),
         ).fetchone()
         return _serialize_user(row)
+
+
+def set_user_avatar(user_id: int, image_bytes: bytes) -> dict:
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise HTTPException(500, "头像处理依赖未安装") from exc
+
+    if len(image_bytes) > 5 * 1024 * 1024:
+        raise HTTPException(400, "头像文件不能超过 5MB")
+
+    try:
+        image = Image.open(BytesIO(image_bytes))
+        image = ImageOps.exif_transpose(image)
+    except Exception as exc:
+        raise HTTPException(400, "无法识别的图片文件") from exc
+
+    image = ImageOps.fit(image.convert("RGB"), (256, 256), method=Image.Resampling.LANCZOS)
+    avatar_path = get_avatar_path(user_id)
+    avatar_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(avatar_path, format="JPEG", quality=90, optimize=True)
+
+    now = _now_ts()
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE users SET avatar_updated_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, user_id),
+        )
+        row = conn.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "用户不存在")
+    return _serialize_user(row)
 
 
 def change_password(user_id: int, current_password: str, new_password: str) -> dict:
@@ -895,7 +951,7 @@ def list_comments(
         ).fetchone()["total"]
         roots = conn.execute(
             """
-            SELECT comments.*, users.username, users.is_admin
+            SELECT comments.*, users.username, users.is_admin, users.avatar_updated_at
             FROM comments
             JOIN users ON users.id = comments.user_id
             WHERE comments.album_id = ? AND comments.parent_id IS NULL
@@ -912,7 +968,7 @@ def list_comments(
             placeholders = ",".join("?" for _ in pending_parent_ids)
             batch = conn.execute(
                 f"""
-                SELECT comments.*, users.username, users.is_admin
+                SELECT comments.*, users.username, users.is_admin, users.avatar_updated_at
                 FROM comments
                 JOIN users ON users.id = comments.user_id
                 WHERE comments.parent_id IN ({placeholders})
@@ -977,7 +1033,7 @@ def create_comment(user_id: int, album_id: str, content: str, parent_id: Optiona
         )
         row = conn.execute(
             """
-            SELECT comments.*, users.username, users.is_admin
+            SELECT comments.*, users.username, users.is_admin, users.avatar_updated_at
             FROM comments
             JOIN users ON users.id = comments.user_id
             WHERE comments.id = ?

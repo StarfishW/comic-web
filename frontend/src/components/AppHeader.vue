@@ -26,6 +26,7 @@ const filteredHistory = computed(() => {
 })
 
 const currentUserLabel = computed(() => getUserLabel(authState.user))
+const currentUserAvatar = computed(() => authState.user?.avatar_url || '')
 const showAdminEntry = computed(() => isAdminUser(authState.user))
 
 function loadHistory() {
@@ -220,6 +221,9 @@ onUnmounted(() => {
       </form>
 
       <div v-if="authState.user" class="auth-actions" @click.stop>
+        <span v-if="currentUserAvatar" class="avatar-chip">
+          <img :src="currentUserAvatar" :alt="currentUserLabel" class="avatar-img" />
+        </span>
         <span class="user-chip" :title="currentUserLabel">{{ currentUserLabel }}</span>
         <router-link v-if="showAdminEntry" to="/admin/users" class="nav-link auth-link">管理</router-link>
         <button class="nav-link auth-link auth-logout" :disabled="loggingOut" @click="handleLogout">
@@ -260,6 +264,9 @@ onUnmounted(() => {
       <div v-if="mobileMenuOpen" class="mobile-menu">
         <nav class="mobile-nav">
           <div v-if="authState.user" class="mobile-user-card">
+            <span v-if="currentUserAvatar" class="mobile-avatar-wrap">
+              <img :src="currentUserAvatar" :alt="currentUserLabel" class="mobile-avatar" />
+            </span>
             <span class="mobile-user-label">当前用户</span>
             <strong class="mobile-user-name">{{ currentUserLabel }}</strong>
           </div>
@@ -386,6 +393,25 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+.avatar-chip {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--color-primary-light);
+  flex-shrink: 0;
+}
+
+.avatar-img,
+.mobile-avatar {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .user-chip {
   max-width: 160px;
   padding: 0 12px;
@@ -482,6 +508,18 @@ onUnmounted(() => {
   margin-bottom: 6px;
   border-radius: var(--radius-md);
   background: var(--color-primary-light);
+}
+
+.mobile-avatar-wrap {
+  width: 52px;
+  height: 52px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.7);
+  margin-bottom: 4px;
 }
 
 .mobile-user-label {

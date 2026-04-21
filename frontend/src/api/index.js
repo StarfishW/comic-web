@@ -93,6 +93,14 @@ export const deleteAdminUser = (userId) =>
 export const changePassword = (payload) =>
   http.post('/auth/change-password', payload)
 
+export const uploadAvatar = (file) => {
+  const formData = new FormData()
+  formData.append('avatar', file)
+  return http.post('/users/me/avatar', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+
 // ---- Favorites ----
 export const getFavorites = (params = {}) =>
   http.get('/favorites', { params })
